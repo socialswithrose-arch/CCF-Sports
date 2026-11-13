@@ -154,8 +154,8 @@
       if (!pw) return (err.textContent = "Enter the password.");
       A.api("leader", { action: "login", name: name, password: pw }).then(function (r) {
         A.save("ccf.leader", { auth: r.auth, name: r.name, role: r.role || "leader" }); A.save("ccf.leaderName", r.name);
-        A.toast("Welcome, " + r.name + ". Downloading players for offline use…");
-        sync(); A.go("#/leader/scan");
+        A.toast(r.setup ? "Welcome, " + r.name + ". First step: add the leaders' names in Settings." : "Welcome, " + r.name + ". Downloading players for offline use…");
+        sync(); A.go(r.setup ? "#/leader/settings" : "#/leader/scan");
       }, function (e2) { err.textContent = e2.offline ? "You need internet to sign in the first time." : e2.message; });
     });
   };
@@ -507,12 +507,23 @@
     if (!r) return '<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" fill="' + fill + '"/>';
     return '<path d="M' + x + "," + (y + h) + " V" + (y + r) + " Q" + x + "," + y + " " + (x + r) + "," + y + " H" + (x + w - r) + " Q" + (x + w) + "," + y + " " + (x + w) + "," + (y + r) + " V" + (y + h) + ' Z" fill="' + fill + '"/>';
   }
+  function volunteers() { return D.players.filter(function (p) { return p.volunteer && ((p.firstName || "") + (p.lastName || "")).trim(); }); }
   function leaderNames() {
     var s = new Set((D.settings.leaders || []).filter(Boolean));
+    volunteers().forEach(function (p) { s.add(L.fullName(p).trim()); });
     D.dgroups.forEach(function (g) { if (g.leader) s.add(g.leader); });
     D.players.forEach(function (p) { if (p.facilitator) s.add(p.facilitator); });
     return Array.from(s).sort(function (a, b) { return a.localeCompare(b); });
   }
+  // Picker for "Leader caring for them": volunteers from the same satellite first, then other volunteers, then other leaders.
+  function facOptions(sat) {
+    var seen = new Set(), out = [];
+    var vols = volunteers().slice().sort(function (a, b) { return ((a.satellite === sat) ? 0 : 1) - ((b.satellite === sat) ? 0 : 1) || L.fullName(a).localeCompare(L.fullName(b)); });
+    vols.forEach(function (v) { var n = L.fullName(v).trim(); if (seen.has(n)) return; seen.add(n); out.push('<option value="' + esc(n) + '" label="Volunteer' + (v.satellite ? " · " + esc(v.satellite) : "") + '">'); });
+    leaderNames().forEach(function (n) { if (seen.has(n)) return; seen.add(n); out.push('<option value="' + esc(n) + '" label="Leader">'); });
+    return out.join("");
+  }
+  function isMine(p) { var me = ((auth() || {}).name || "").trim().toLowerCase(), f = (fac(p) || "").trim().toLowerCase(); return !!me && !!f && (f === me || f.indexOf(me + " ") === 0); }
   function paintFacilitators(m) {
     var map = new Map(leaderNames().map(function (n) { return [n, []]; })); map.set("", []);
     m.PL.forEach(function (p) { if (p.volunteer) return; var f = fac(p); if (!map.has(f)) map.set(f, []); map.get(f).push(p); });
@@ -522,7 +533,7 @@
         reached: ps.filter(function (p) { return L.outreachOf(p) !== "not_yet"; }).length, dg: ps.filter(function (p) { return L.outreachOf(p) === "attending"; }).length,
         saved: ps.filter(function (p) { return L.stageIdx(p.stage) >= L.stageIdx("received"); }).length, act: ps.filter(function (p) { return act(p, m.vbp.get(p.id) || [], m.rbp); }).length };
     }).sort(function (a, b) { return (a.n === "") - (b.n === "") || b.total - a.total; });
-    if (!D.players.length) { $("#facTable").innerHTML = '<div class="empty">Add leaders in Settings, then assign players to them.</div>'; return; }
+    if (!D.players.length) { $("#facTable").innerHTML = '<div class="empty">Volunteers appear here once they sign up. Then open each attendee and pick the volunteer caring for them.</div>'; return; }
     $("#facTable").innerHTML = '<table class="t"><thead><tr><th>Leader</th><th class="num">Players</th><th class="num">Came</th><th class="num">Regulars</th><th class="num">Reached out</th><th class="num">In D-group</th><th class="num">Received Christ</th><th class="num">Need action</th></tr></thead><tbody>' +
       rows.map(function (r) { return '<tr class="click" data-f="' + esc(r.n || "__none") + '"><td><b>' + (r.n ? esc(r.n) : '<span style="color:var(--warn)">No leader yet</span>') + '</b></td><td class="num">' + r.total + '</td><td class="num">' + r.active + '</td><td class="num">' + r.regular + '</td><td class="num">' + r.reached + '</td><td class="num">' + r.dg + '</td><td class="num">' + r.saved + '</td><td class="num">' + (r.act ? '<b style="color:var(--warn)">' + r.act + "</b>" : "0") + "</td></tr>"; }).join("") + "</tbody></table>";
     $$("#facTable tr[data-f]").forEach(function (tr) { tr.onclick = function () { fuFilter.who = tr.dataset.f; fuFilter.action = false; A.go("#/leader/followup"); }; });
@@ -646,7 +657,7 @@
   }
 
   /* ---------------- players ---------------- */
-  var plFilter = { q: "", stage: "", group: "", type: "" }, plSort = { key: "last", dir: -1 };
+  var plFilter = { q: "", stage: "", group: "", type: "", who: "" }, plSort = { key: "last", dir: -1 };
   A.routes["/leader/players"] = function () {
     if (needAuth(true)) return;
     lshell("players",
@@ -654,6 +665,7 @@
       '<div class="card"><div class="filters"><input class="input search" id="pq" placeholder="Search name, phone, code, area…" aria-label="Search players">' +
       '<select class="input" id="pst" aria-label="Faith step"><option value="">All faith steps</option>' + L.STAGES.map(function (s) { return '<option value="' + s.k + '">' + esc(s.label) + "</option>"; }).join("") + "</select>" +
       '<select class="input" id="pgr" aria-label="D-group"></select>' +
+      '<select class="input" id="pld" aria-label="Caring leader"></select>' +
       '<select class="input" id="psat" aria-label="Satellite"><option value="">All satellites</option>' + L.SATELLITES.map(function (x) { return "<option>" + x + "</option>"; }).join("") + '</select>' +
       '<select class="input" id="pty" aria-label="Attendance"><option value="">All attendance</option>' + Object.keys(L.ATT).map(function (k) { return '<option value="' + k + '">' + esc(L.ATT[k].label) + "</option>"; }).join("") + "</select></div>" +
       '<div class="table-wrap"><table class="t" id="pt"></table></div><div class="sub" id="pc" style="margin:10px 0 0"></div></div>');
@@ -661,6 +673,7 @@
     $("#pq").oninput = function () { plFilter.q = this.value; paintPlayers(); };
     $("#pst").onchange = function () { plFilter.stage = this.value; paintPlayers(); };
     $("#pgr").onchange = function () { plFilter.group = this.value; paintPlayers(); };
+    $("#pld").onchange = function () { plFilter.who = this.value; paintPlayers(); };
     $("#pty").onchange = function () { plFilter.type = this.value; paintPlayers(); };
     $("#psat").value = plFilter.sat || ""; $("#psat").onchange = function () { plFilter.sat = this.value; paintPlayers(); };
     $("#addPl").onclick = function () { openPlayer(null); };
@@ -671,6 +684,9 @@
     var sel = $("#pgr"); if (!sel) return;
     sel.innerHTML = '<option value="">All D-groups</option><option value="__none">Not in a D-group</option>' + D.dgroups.map(function (g) { return '<option value="' + esc(g.id) + '">' + esc(g.name) + "</option>"; }).join("");
     sel.value = plFilter.group;
+    var me = (auth() || {}).name || "";
+    $("#pld").innerHTML = '<option value="">All leaders</option>' + (me ? '<option value="__me">My people (' + esc(me) + ')</option>' : "") + '<option value="__none">No leader yet</option><option value="__vol">Volunteers only</option>' + leaderNames().map(function (n) { return '<option value="' + esc(n) + '">' + esc(n) + "</option>"; }).join("");
+    $("#pld").value = plFilter.who || "";
     var vbp = L.visitsByPlayer(D.checkins), q = plFilter.q.trim().toLowerCase();
     var rows = D.players.map(function (p) { var v = vbp.get(p.id) || []; return { p: p, v: v, last: v[v.length - 1] || "", att: L.attendanceOf(v) }; }).filter(function (r) {
       var p = r.p;
@@ -679,6 +695,11 @@
       if (plFilter.group === "__none" && p.dgroupId) return false;
       if (plFilter.group && plFilter.group !== "__none" && p.dgroupId !== plFilter.group) return false;
       if (plFilter.type && r.att !== plFilter.type) return false;
+      var w = plFilter.who || "";
+      if (w === "__me" && (p.volunteer || !isMine(p))) return false;
+      if (w === "__none" && (p.volunteer || fac(p))) return false;
+      if (w === "__vol" && !p.volunteer) return false;
+      if (w && w.indexOf("__") !== 0 && (p.volunteer || fac(p) !== w)) return false;
       if (plFilter.sat === "__none" && p.satellite) return false;
       if (plFilter.sat && plFilter.sat !== "__none" && p.satellite !== plFilter.sat) return false;
       return true;
@@ -689,7 +710,7 @@
     $("#pt").innerHTML = "<thead><tr>" + th("name", "Name") + "<th>Code</th><th>Mobile</th><th>Life stage</th>" + th("visits", "Visits", "num") + "<th>Attendance</th>" + th("last", "Last seen") + th("stage", "Faith step") + "<th>D-group</th><th>Leader</th></tr></thead><tbody>" +
       (rows.map(function (r) {
         var p = r.p;
-        return '<tr class="click" data-id="' + esc(p.id) + '"><td><b>' + esc(L.fullName(p)) + '</b><div class="sub" style="margin:0">' + esc(p.location || "") + "</div></td><td style=\"white-space:nowrap\">" + esc(L.codeLabel(p)) + "</td><td style=\"white-space:nowrap\">" + esc(p.phone) + '</td><td style="font-size:13px">' + esc(p.lifeStage || "—") + '<div class="sub" style="margin:0">' + esc(p.volunteer ? "Volunteer" : (p.churchStatus || "")) + (p.satellite ? " · " + esc(p.satellite) : "") + (playsBoth(p) ? " · plays both" : "") + '</div></td><td class="num">' + r.v.length + '</td><td><span class="pill"><span class="dot" style="background:' + L.ATT[r.att].color + '"></span>' + esc(L.ATT[r.att].label) + "</span></td><td>" + A.fmt(r.last) + '</td><td><span class="pill">' + esc(L.stageLabel(p.stage)) + "</span></td><td>" + esc(dgName(p.dgroupId) || "—") + '</td><td style="font-size:13px">' + esc(fac(p) || "—") + "</td></tr>";
+        return '<tr class="click" data-id="' + esc(p.id) + '"><td><b>' + esc(L.fullName(p)) + '</b><div class="sub" style="margin:0">' + esc(p.location || "") + "</div></td><td style=\"white-space:nowrap\">" + esc(L.codeLabel(p)) + "</td><td style=\"white-space:nowrap\">" + esc(p.phone) + '</td><td style="font-size:13px">' + esc(p.lifeStage || "—") + '<div class="sub" style="margin:0">' + esc(p.volunteer ? "Volunteer" : (p.churchStatus || "")) + (p.satellite ? " · " + esc(p.satellite) : "") + (playsBoth(p) ? " · plays both" : "") + '</div></td><td class="num">' + r.v.length + '</td><td><span class="pill"><span class="dot" style="background:' + L.ATT[r.att].color + '"></span>' + esc(L.ATT[r.att].label) + "</span></td><td>" + A.fmt(r.last) + '</td><td><span class="pill">' + esc(L.stageLabel(p.stage)) + "</span></td><td>" + esc(dgName(p.dgroupId) || "—") + '</td><td style="font-size:13px">' + (p.volunteer ? '<span class="pill">Volunteer</span>' : esc(fac(p) || "—")) + "</td></tr>";
       }).join("") || '<tr><td colspan="10"><div class="empty">' + (D.players.length ? "No players match these filters." : "No players yet. They appear here as they sign up.") + "</div></td></tr>") + "</tbody>";
     $$("#pt th button").forEach(function (b) { b.onclick = function () { var key = b.dataset.k; plSort = { key: key, dir: plSort.key === key ? -plSort.dir : (key === "name" ? 1 : -1) }; paintPlayers(); }; });
     $$("#pt tr[data-id]").forEach(function (tr) { tr.onclick = function () { openPlayer(tr.dataset.id); }; });
@@ -727,8 +748,9 @@
       '<div style="display:flex;gap:10px;align-items:center;font-size:13px;color:var(--text-2);flex-wrap:wrap"><span id="mStageInfo"></span><label style="margin-left:auto">Date of this step <input type="date" class="input" id="mStageDate" style="width:auto;min-height:36px;padding:4px 8px;display:inline-block"></label></div>' +
       '<div class="section-t">Care &amp; D-group</div>' +
       (isNew ? "" : '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;font-size:13px;color:var(--text-2)">Attendance (automatic): <span class="pill"><span class="dot" style="background:' + L.ATT[att].color + '"></span>' + esc(L.ATT[att].label) + "</span>" + esc(L.ATT[att].hint) + "</div>") +
-      '<div class="grid2 stack"><div><label class="f" for="mFac">Leader caring for them</label><input class="input" id="mFac" list="mFacList" value="' + esc(p.facilitator || "") + '" placeholder="' + esc(L.facilitatorOf(Object.assign({}, p, { facilitator: "" }), D.dgroups) || "Type or pick a name") + '"><datalist id="mFacList">' + leaderNames().map(function (n) { return '<option value="' + esc(n) + '">'; }).join("") + "</datalist>" +
+      '<div class="grid2 stack"><div id="mFacWrap"><label class="f" for="mFac">Volunteer / leader caring for them</label><input class="input" id="mFac" list="mFacList" value="' + esc(p.facilitator || "") + '" placeholder="' + esc(L.facilitatorOf(Object.assign({}, p, { facilitator: "" }), D.dgroups) || "Type or pick a name") + '"><datalist id="mFacList">' + facOptions(p.satellite) + "</datalist>" +
       '<button type="button" class="btn small ghost" id="mMe" style="margin-top:4px">Assign to me</button></div>' +
+      '<div id="mVolNote" class="sub" style="margin:0;align-self:center"></div>' +
       '<div><label class="f" for="mOut">D-group outreach</label><div style="display:flex;gap:6px"><select class="input" id="mOut">' + L.OUTREACH.map(function (o) { return '<option value="' + o.k + '"' + (L.outreachOf(p) === o.k ? " selected" : "") + ">" + esc(o.label) + "</option>"; }).join("") + '</select><input type="date" class="input" id="mOutDate" style="width:150px" aria-label="Date reached out" value="' + esc(p.dgOutreachDate || "") + '"></div></div>' +
       '<div><label class="f" for="mDg">D-group</label><select class="input" id="mDg"><option value="">Not yet</option>' + D.dgroups.map(function (g) { return '<option value="' + esc(g.id) + '"' + (g.id === p.dgroupId ? " selected" : "") + ">" + esc(g.name) + (g.leader ? " — " + esc(g.leader) : "") + "</option>"; }).join("") + "</select></div>" +
       '<div><label class="f" for="mDgDate">Date forwarded</label><input type="date" class="input" id="mDgDate" value="' + esc(p.dgroupDate || "") + '"></div></div>' +
@@ -758,6 +780,14 @@
     $("#mDg").onchange = function () { if (this.value) { if (!$("#mDgDate").value) $("#mDgDate").value = t; $("#mOut").value = "attending"; if (!$("#mOutDate").value) $("#mOutDate").value = t; } else { $("#mDgDate").value = ""; if ($("#mOut").value === "attending") $("#mOut").value = "invited"; } };
     $("#mOut").onchange = function () { if (this.value !== "not_yet" && !$("#mOutDate").value) $("#mOutDate").value = t; if (this.value === "not_yet") $("#mOutDate").value = ""; };
     $("#mMe").onclick = function () { $("#mFac").value = (auth() || {}).name || ""; };
+    var volNote = function () {
+      var vol = $("#mVol").checked, nm = (($("#mFirst").value || "") + " " + ($("#mLast").value || "")).trim().toLowerCase();
+      $("#mFacWrap").style.display = vol ? "none" : "";
+      var mine = vol && nm ? D.players.filter(function (x) { return !x.volunteer && (fac(x) || "").trim().toLowerCase() === nm; }).length : 0;
+      $("#mVolNote").innerHTML = vol ? "<b>Volunteer</b>: they look after attendees, so they aren't assigned a leader themselves. Caring for <b>" + mine + "</b> attendee" + (mine === 1 ? "" : "s") + "." : "";
+    };
+    $("#mVol").addEventListener("change", volNote); volNote();
+    $("#mSat").addEventListener("change", function () { $("#mFacList").innerHTML = facOptions(this.value); });
     drawStep();
     if (!isNew) {
       A.qrInto($("#mQr"), L.codeLabel(p), 150);
@@ -777,7 +807,7 @@
       var upd = {
         firstName: $("#mFirst").value.trim(), lastName: $("#mLast").value.trim(), phone: $("#mPhone").value.trim(), email: $("#mEmail").value.trim(),
         location: $("#mLoc").value.trim(), lifeStage: $("#mLife").value, churchStatus: $("#mChurch").value, satellite: $("#mSat").value, invitedBy: $("#mInv").value.trim(), wantsConnect: $("#mWant").value,
-        contactOk: $("#mOk").checked, followedUp: $("#mFu").checked, volunteer: $("#mVol").checked, facilitator: $("#mFac").value.trim(),
+        contactOk: $("#mOk").checked, followedUp: $("#mFu").checked, volunteer: $("#mVol").checked, facilitator: $("#mVol").checked ? "" : $("#mFac").value.trim(),
         dgOutreach: out, dgOutreachDate: out === "not_yet" ? "" : ($("#mOutDate").value || p.dgOutreachDate || t),
         stage: stage, stageDates: p.stageDates, dgroupId: $("#mDg").value, dgroupDate: $("#mDg").value ? ($("#mDgDate").value || t) : "", notes: $("#mNotes").value
       };
@@ -798,7 +828,7 @@
       '<div class="row even"><div class="card"><h3>Ministry</h3><div class="sub">Shown to players</div>' +
       '<label class="f" for="sName">Ministry name</label><input class="input" id="sName" value="' + esc(D.settings.name || "CCF Sports Ministry") + '">' +
       '<label class="f" for="sTag" style="margin-top:12px">Welcome line</label><input class="input" id="sTag" value="' + esc(D.settings.tagline || "Play with a purpose.") + '">' +
-      '<label class="f" for="sLeaders" style="margin-top:12px">Ministry leaders &amp; facilitators (one name per line)</label><textarea class="input" id="sLeaders" rows="5">' + esc((D.settings.leaders || []).join("\n")) + "</textarea>" +
+      '<label class="f" for="sLeaders" style="margin-top:12px">Leaders who can sign in (one full name per line, e.g. John Sola). Only these names can sign in with the leader password, and each one sees their own people under Follow-up. Include your own name.</label><textarea class="input" id="sLeaders" rows="5">' + esc((D.settings.leaders || []).join("\n")) + "</textarea>" +
       '<div class="section-t" style="margin-top:16px">Game schedule</div><div class="sub">Players see "I\'ll play" for the next game day.</div><div id="sched"></div>' +
       '<div style="margin-top:12px"><button class="btn primary" id="sSave">Save</button></div></div>' +
       '<div class="card"><h3>D-groups</h3><div class="sub">The discipleship groups players can join</div><div id="dgEdit"></div><button class="btn small" id="dgAdd">+ Add D-group</button></div></div>' +
@@ -817,7 +847,10 @@
     }).join("");
     $("#sSave").onclick = function () {
       var schedule = $$("[data-dow]").filter(function (c) { return c.checked; }).map(function (c) { var d = +c.dataset.dow; return { dow: d, time: $('[data-time="' + d + '"]').value || "08:00" }; });
-      queue({ type: "settings", data: { name: $("#sName").value.trim() || "CCF Sports Ministry", tagline: $("#sTag").value.trim(), leaders: $("#sLeaders").value.split("\n").map(function (s) { return s.trim(); }).filter(Boolean), schedule: schedule } }); A.toast("Saved");
+      queue({ type: "settings", data: { name: $("#sName").value.trim() || "CCF Sports Ministry", tagline: $("#sTag").value.trim(), leaders: (function () {
+        var ls = $("#sLeaders").value.split("\n").map(function (s) { return s.trim(); }).filter(Boolean), me = ((auth() || {}).name || "").trim();
+        if (ls.length && me && (auth() || {}).role === "leader" && !ls.some(function (n) { return n.toLowerCase() === me.toLowerCase(); })) { ls.unshift(me); $("#sLeaders").value = ls.join("\n"); A.toast("Added your name too, so you don't lock yourself out."); }
+        return ls; })(), schedule: schedule } }); A.toast("Saved");
     };
     $("#dgAdd").onclick = function () { queue({ type: "dgroup", id: rid(), data: { name: "New D-group", leader: "", meets: "" } }); paintDg(); };
     $("#sSync").onclick = function () { sync().then(function () { A.toast(status.online ? "Up to date" : "Still offline"); }); };

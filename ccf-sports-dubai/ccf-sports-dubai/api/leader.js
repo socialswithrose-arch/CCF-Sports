@@ -19,6 +19,20 @@ function leader(b) {
   if (!who) throw fail(401, "Please sign in again.");
   return who;
 }
+/* Leaders list in Settings = who may sign in with the leader password.
+   While the list is empty (first setup), any name works so the first leader can add everyone. */
+const norm = (x) => String(x || "").trim().replace(/\s+/g, " ").toLowerCase();
+async function allowedName(name) {
+  const st = (await db.get("settings", "main")) || {};
+  const list = (st.leaders || []).filter(Boolean);
+  if (!list.length) return { name, open: true };
+  const hit = list.find((n) => norm(n) === norm(name));
+  return hit ? { name: hit } : null;
+}
+async function stillAllowed(who) {
+  if (who.role !== "leader") return;
+  if (!(await allowedName(who.name))) throw fail(401, "Your name isn't on the leaders list any more. Ask the ministry lead.");
+}
 function leaderOnly(b) {
   const who = leader(b);
   if (who.role !== "leader") throw fail(403, "Only leaders can do that.");
@@ -73,11 +87,18 @@ module.exports = handler({
     if (!name) throw fail(400, "Enter your name.");
     const role = auth.checkPassword(b.password);
     if (!role) throw fail(401, "That password isn't right.");
-    return { auth: auth.leaderToken(name, role), name, role };
+    let use = name, open = false;
+    if (role === "leader") {
+      const ok = await allowedName(name);
+      if (!ok) throw fail(403, "“" + name + "” isn't on the leaders list. Type your name exactly as the ministry lead added it, or ask them to add you in Settings.");
+      use = ok.name; open = !!ok.open;
+    }
+    return { auth: auth.leaderToken(use, role), name: use, role, setup: open };
   },
 
   async all(b) {
     const who = leader(b);
+    await stillAllowed(who);
     const d = await loadAll();
     delete d.settings.id;
     const since = Logic.addDays(Logic.today(), -180);
@@ -100,6 +121,7 @@ module.exports = handler({
   /* Apply a batch of changes queued on a leader's phone (possibly made offline). */
   async push(b) {
     const who = leader(b);
+    await stillAllowed(who);
     const ops = Array.isArray(b.ops) ? b.ops.slice(0, 500) : [];
     const results = [];
     const newCheckins = [], newPlayers = [];

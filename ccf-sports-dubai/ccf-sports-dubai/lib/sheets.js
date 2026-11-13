@@ -95,6 +95,7 @@ async function rebuild(data) {
   const names = new Set();
   ((settings && settings.leaders) || []).forEach((n) => n && names.add(n));
   dgroups.forEach((g) => g.leader && names.add(g.leader));
+  players.forEach((p) => { if (p.volunteer) { const n = [p.firstName, p.lastName].filter(Boolean).join(" ").trim(); if (n) names.add(n); } });
   players.forEach((p) => { const f = Logic.facilitatorOf(p, dgroups); if (f) names.add(f); });
   const lrows = [["Unassigned"]].concat([...names].sort((a, b) => a.localeCompare(b)).map((n) => [txt(n)]));
 
