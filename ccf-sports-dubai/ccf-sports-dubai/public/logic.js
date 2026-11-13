@@ -73,8 +73,11 @@
   function outreachOf(p) { return p.dgOutreach || (p.dgroupId || p.churchStatus === CHURCH[0] ? "attending" : "not_yet"); }
   function outreachLabel(k) { var o = OUTREACH.find(function (x) { return x.k === k; }); return (o || OUTREACH[0]).label; }
 
-  function facilitatorOf(p, dgroups) {
-    if (p.facilitator) return p.facilitator;
+  /* Small group lead (sports): the person caring for this player during game play.
+     Not the same as the D-group leader, who is set on the D-group once the player commits to one. */
+  function facilitatorOf(p) { return (p && p.facilitator) || ""; }
+  function dgroupLeaderOf(p, dgroups) {
+    if (p.dgroupId && p.dgroupLeader) return p.dgroupLeader;
     var g = (dgroups || []).find(function (g) { return g.id === p.dgroupId; });
     return g && g.leader ? g.leader : "";
   }
@@ -87,7 +90,7 @@
     if (rsvps && twoNoShowsInARow(rsvps, visits, t)) return "Said they'd come twice, didn't: check in on them";
     if ((att === "regular" || (att === "occasional" && visits.length >= 3) || p.wantsConnect === "Yes, I'm interested" || (p.churchStatus === CHURCH[1] && visits.length >= 2)) && out === "not_yet") return "Invite to a D-group";
     if (out === "invited" && p.dgOutreachDate && daysBetween(p.dgOutreachDate, t) > 14) return "Check on D-group invite";
-    if (visits.length >= 2 && !fac && att !== "noreturn") return "Assign a leader";
+    if (visits.length >= 2 && !fac && att !== "noreturn") return "Assign a small group lead";
     if (att === "lapsed" && out === "attending") return "Lapsed but in D-group: check in";
     if (att === "lapsed" && stageIdx(p.stage) >= 1) return "Reach out: hasn't come in 30+ days";
     return "";
@@ -100,14 +103,25 @@
     var s = settings && Array.isArray(settings.schedule) && settings.schedule.length ? settings.schedule : DEFAULT_SCHEDULE;
     return s.filter(function (x) { return x && x.dow >= 0 && x.dow <= 6; });
   }
-  /* The next game on or after today: { date, time } or null. */
-  function nextGame(settings, t) {
+  /* Each satellite's lead sets that satellite's own game days. Falls back to the ministry-wide schedule. */
+  function satSchedule(settings, sat) {
+    var s = sat && settings && settings.satellites && settings.satellites[sat];
+    if (s && Array.isArray(s.schedule)) return s.schedule.filter(function (x) { return x && x.dow >= 0 && x.dow <= 6; });
+    return scheduleOf(settings);
+  }
+  function isCancelled(settings, sat, d) {
+    return ((settings && settings.venueChanges) || []).some(function (v) { return v.date === d && v.satellite === sat && v.cancelled; });
+  }
+  /* The next game on or after today for a satellite (or any satellite): { date, time, satellite } or null. */
+  function nextGame(settings, t, sat) {
     t = t || today();
-    var sched = scheduleOf(settings);
-    for (var i = 0; i < 14; i++) {
+    var sats = sat ? [sat] : SATELLITES;
+    for (var i = 0; i < 21; i++) {
       var d = addDays(t, i), dow = parse(d).getUTCDay();
-      var g = sched.find(function (x) { return x.dow === dow; });
-      if (g) return { date: d, time: g.time || "" };
+      for (var j = 0; j < sats.length; j++) {
+        var g = satSchedule(settings, sats[j]).find(function (x) { return x.dow === dow; });
+        if (g && !isCancelled(settings, sats[j], d)) return { date: d, time: g.time || "", satellite: sat || "" };
+      }
     }
     return null;
   }
@@ -118,10 +132,13 @@
     var base = ((settings && settings.satellites) || {})[satellite] || {};
     var change = ((settings && settings.venueChanges) || []).find(function (v) { return v.date === date && v.satellite === satellite; });
     var g = change || base;
-    var sched = scheduleOf(settings).find(function (x) { return x.dow === parse(date).getUTCDay(); });
-    return { satellite: satellite, gym: g.gym || "", map: g.map || "", time: (change && change.time) || base.time || (sched && sched.time) || "", changed: !!change };
+    var sched = satSchedule(settings, satellite).find(function (x) { return x.dow === parse(date).getUTCDay(); });
+    return { satellite: satellite, gym: (change && change.gym) || base.gym || "", map: (change && change.map) || base.map || "", time: (change && change.time) || (sched && sched.time) || base.time || "", changed: !!(change && !change.cancelled && change.gym), cancelled: !!(change && change.cancelled) };
   }
-  function isGameDay(settings, d) { var dow = parse(d).getUTCDay(); return scheduleOf(settings).some(function (x) { return x.dow === dow; }); }
+  function isGameDay(settings, d, sat) {
+    var dow = parse(d).getUTCDay();
+    return (sat ? [sat] : SATELLITES).some(function (s) { return !isCancelled(settings, s, d) && satSchedule(settings, s).some(function (x) { return x.dow === dow; }); });
+  }
   function fmtTime(hhmm) {
     if (!hhmm) return "";
     var a = hhmm.split(":").map(Number), h = a[0], m = a[1] || 0;
@@ -143,13 +160,44 @@
     return !v.has(last2[0].date) && !v.has(last2[1].date);
   }
 
-  /* ---- the game day's line-up, in games of 10 (Team A / Team B):
-     first-timers first, then other players by arrival, then volunteers by arrival (only if spots are left) ---- */
-  function lineupRank(c) { return c.role === "volunteer" ? 2 : (c.firstTime ? 0 : 1); }
-  function lineup(checkinsToday) {
-    var players = checkinsToday.filter(function (c) { return !c.sitOut; });
-    players.sort(function (a, b) { return lineupRank(a) - lineupRank(b) || (a.ts || 0) - (b.ts || 0); });
-    return players.map(function (c, i) { return { checkin: c, n: i + 1, game: Math.floor(i / 10) + 1, team: i % 2 === 0 ? "A" : "B" }; });
+  /* ---- the game day's line-up ----
+     Who plays first, in this order (arrival time breaks ties inside each group):
+       1 first-timers, 2 attendees, 3 CCF churchgoers with no D-group, 4 D-group attendees, 5 volunteers (once everyone has played).
+     A satellite lead can change the order by hand, the players per game and the number of games. */
+  var PRIORITY = ["First-timer", "Attendee", "CCF churchgoer, no D-group", "D-group attendee", "Volunteer"];
+  function priorityOf(c, p) {
+    p = p || {};
+    if (c.role === "volunteer" || p.volunteer) return 4;
+    if (c.firstTime) return 0;
+    if (p.dgroupId || p.churchStatus === CHURCH[0] || p.dgOutreach === "attending") return 3;
+    if (p.churchStatus === CHURCH[1]) return 2;
+    return 1;
+  }
+  function gameKey(date, sat) { return date + "|" + (sat || ""); }
+  /* The lead's settings for one satellite's game day: { perGame, games, order }. */
+  function gameConfig(settings, date, sat) { return ((settings && settings.gameDays) || {})[gameKey(date, sat)] || {}; }
+  function lineup(checkinsToday, players, cfg) {
+    cfg = cfg || {};
+    var get = function (id) { return !players ? null : players.get ? players.get(id) : players.find(function (x) { return x.id === id; }); };
+    var list = checkinsToday.filter(function (c) { return !c.sitOut; }).map(function (c) { return { c: c, r: priorityOf(c, get(c.playerId)) }; });
+    list.sort(function (a, b) { return a.r - b.r || (a.c.ts || 0) - (b.c.ts || 0); });
+    if (cfg.order && cfg.order.length) {
+      var byId = new Map(list.map(function (x) { return [x.c.id, x]; }));
+      var manual = cfg.order.map(function (id) { return byId.get(id); }).filter(Boolean);
+      var inManual = new Set(manual.map(function (x) { return x.c.id; }));
+      // people who arrived after the lead arranged the line-up slot in by priority
+      list.filter(function (x) { return !inManual.has(x.c.id); }).forEach(function (x) {
+        var at = -1; manual.forEach(function (m, i) { if (m.r <= x.r) at = i; });
+        manual.splice(at + 1, 0, x);
+      });
+      list = manual;
+    }
+    var n = list.length, per = Math.max(2, parseInt(cfg.perGame, 10) || 10);
+    var size = cfg.games > 0 ? Math.max(2, Math.ceil(n / cfg.games)) : per;
+    return list.map(function (x, i) {
+      var inGame = i % size;
+      return { checkin: x.c, n: i + 1, game: Math.floor(i / size) + 1, team: inGame % 2 === 0 ? "A" : "B", priority: x.r, size: size };
+    });
   }
 
   /* Where a player has actually played: "North 6, South 2". checkins = that player's check-ins. */
@@ -181,7 +229,8 @@
     outreachLabel: outreachLabel, facilitatorOf: facilitatorOf, nextAction: nextAction,
     visitsByPlayer: visitsByPlayer, fullName: fullName, codeLabel: codeLabel,
     DAYS: DAYS, DEFAULT_SCHEDULE: DEFAULT_SCHEDULE, scheduleOf: scheduleOf, nextGame: nextGame, isGameDay: isGameDay, fmtTime: fmtTime, dayName: dayName,
-    noShows: noShows, twoNoShowsInARow: twoNoShowsInARow, lineup: lineup, rsvpsByPlayer: rsvpsByPlayer
+    noShows: noShows, twoNoShowsInARow: twoNoShowsInARow, lineup: lineup, rsvpsByPlayer: rsvpsByPlayer,
+    satSchedule: satSchedule, isCancelled: isCancelled, PRIORITY: PRIORITY, priorityOf: priorityOf, gameKey: gameKey, gameConfig: gameConfig, dgroupLeaderOf: dgroupLeaderOf
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.Logic = api;

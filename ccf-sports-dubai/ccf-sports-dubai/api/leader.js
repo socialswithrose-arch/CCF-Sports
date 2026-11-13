@@ -9,7 +9,9 @@ const { nextCode } = require("../lib/codes");
 
 const PLAYER_FIELDS = ["firstName", "lastName", "phone", "email", "location", "lifeStage", "invitedBy", "wantsConnect", "contactOk",
   "firstVisit", "stage", "stageDates", "dgroupId", "dgroupDate", "dgOutreach", "dgOutreachDate", "facilitator",
-  "followedUp", "followedUpDate", "notes", "code", "createdAt", "source", "volunteer", "churchStatus", "satellite"];
+  "followedUp", "followedUpDate", "notes", "code", "createdAt", "source", "volunteer", "churchStatus", "satellite", "dgroupLeader"];
+/* What a volunteer may change on players assigned to them (or that they cover): everything except who leads them. */
+const VOLUNTEER_EDIT_FIELDS = PLAYER_FIELDS.filter((k) => !["facilitator", "volunteer", "code", "createdAt", "source"].includes(k));
 /* What a volunteer may fill in when signing up a new player at the table. */
 const VOLUNTEER_CREATE_FIELDS = ["firstName", "lastName", "phone", "email", "location", "lifeStage", "invitedBy", "wantsConnect", "contactOk", "volunteer", "churchStatus", "satellite",
   "firstVisit", "stage", "stageDates", "code", "createdAt", "source"];
@@ -44,14 +46,50 @@ function cleanSatellites(v) {
   Logic.SATELLITES.forEach((k) => {
     const x = v[k] || {};
     out[k] = { gym: str(x.gym, 120), map: /^https?:\/\//.test(x.map || "") ? str(x.map, 500) : "", time: /^\d{2}:\d{2}$/.test(x.time || "") ? x.time : "" };
+    const sch = cleanSchedule(x.schedule); if (sch) out[k].schedule = sch; // each satellite's own game days
   });
   return out;
+}
+const isDate = (d) => /^\d{4}-\d{2}-\d{2}$/.test(d || "");
+/* Line-up settings per game day and satellite: { "YYYY-MM-DD|North": { perGame, games, order[] } }. Old days are dropped. */
+function cleanGameDays(v) {
+  if (!v || typeof v !== "object") return undefined;
+  const since = Logic.addDays(Logic.today(), -14), out = {};
+  Object.keys(v).slice(0, 200).forEach((k) => {
+    const [d, sat] = k.split("|"); const x = v[k] || {};
+    if (!isDate(d) || d < since || !Logic.SATELLITES.includes(sat)) return;
+    const o = {};
+    const per = parseInt(x.perGame, 10); if (per >= 2 && per <= 30) o.perGame = per;
+    const g = parseInt(x.games, 10); if (g >= 1 && g <= 20) o.games = g;
+    if (Array.isArray(x.order)) o.order = x.order.map((id) => str(id, 60)).filter(Boolean).slice(0, 300);
+    out[k] = o;
+  });
+  return out;
+}
+/* Game-day cover: { "YYYY-MM-DD": { playerId: "Name" } }. */
+function cleanCover(v) {
+  if (!v || typeof v !== "object") return undefined;
+  const since = Logic.addDays(Logic.today(), -14), out = {};
+  Object.keys(v).slice(0, 60).forEach((d) => {
+    if (!isDate(d) || d < since || !v[d] || typeof v[d] !== "object") return;
+    const m = {}; Object.keys(v[d]).slice(0, 500).forEach((pid) => { const n = str(v[d][pid], 60); if (n) m[str(pid, 40)] = n; });
+    if (Object.keys(m).length) out[d] = m;
+  });
+  return out;
+}
+/* Is this player looked after by this person (their small group lead, or covering on a recent/upcoming game day)? */
+const nameIs = (n, me) => { n = norm(n); me = norm(me); return !!me && !!n && (n === me || n.indexOf(me + " ") === 0); };
+function caresFor(p, name, settings) {
+  if (!p || p.volunteer) return false;
+  if (nameIs(p.facilitator, name)) return true;
+  const since = Logic.addDays(Logic.today(), -1), cover = (settings && settings.cover) || {};
+  return Object.keys(cover).some((d) => d >= since && nameIs((cover[d] || {})[p.id], name));
 }
 function cleanVenueChanges(v) {
   if (!Array.isArray(v)) return undefined;
   const since = Logic.addDays(Logic.today(), -7);
   return v.filter((x) => x && /^\d{4}-\d{2}-\d{2}$/.test(x.date || "") && x.date >= since && Logic.SATELLITES.includes(x.satellite))
-    .map((x) => ({ date: x.date, satellite: x.satellite, gym: str(x.gym, 120), map: /^https?:\/\//.test(x.map || "") ? str(x.map, 500) : "", time: /^\d{2}:\d{2}$/.test(x.time || "") ? x.time : "" }))
+    .map((x) => ({ date: x.date, satellite: x.satellite, gym: str(x.gym, 120), map: /^https?:\/\//.test(x.map || "") ? str(x.map, 500) : "", time: /^\d{2}:\d{2}$/.test(x.time || "") ? x.time : "", cancelled: x.cancelled === true }))
     .slice(0, 60);
 }
 function cleanSchedule(v) {
@@ -104,14 +142,20 @@ module.exports = handler({
     const since = Logic.addDays(Logic.today(), -180);
     d.rsvps = d.rsvps.filter((r) => r.date >= since);
     if (who.role === "volunteer") {
-      // Volunteers only get what they need to check people in.
+      // Volunteers get what they need to check people in, plus the full record of the players they look after.
       const t = Logic.today();
       return {
         role: "volunteer",
-        players: d.players.map((p) => ({ id: p.id, firstName: p.firstName, lastName: p.lastName, code: p.code, phone: String(p.phone || "").replace(/\D/g, "").slice(-4), firstVisit: p.firstVisit, volunteer: !!p.volunteer, satellite: p.satellite || "" })),
-        checkins: d.checkins.map((c) => ({ id: c.id, playerId: c.playerId, date: c.date, ts: c.ts, firstTime: c.firstTime, role: c.role, sitOut: c.sitOut, satellite: c.satellite || "" })),
-        rsvps: d.rsvps.filter((r) => r.date >= t), dgroups: [],
-        settings: { name: d.settings.name, schedule: d.settings.schedule, satellites: d.settings.satellites, venueChanges: d.settings.venueChanges }, sessionCodes: auth.sessionCodes(), sheet: false, now: Date.now()
+        players: d.players.map((p) => {
+          if (caresFor(p, who.name, d.settings)) { const c = { ...p }; delete c.token; return c; }
+          // others: just enough for check-in and the line-up order
+          return { id: p.id, firstName: p.firstName, lastName: p.lastName, code: p.code, phone: String(p.phone || "").replace(/\D/g, "").slice(-4), firstVisit: p.firstVisit, volunteer: !!p.volunteer, satellite: p.satellite || "",
+            churchStatus: p.churchStatus || "", dgroupId: p.dgroupId ? "yes" : "", dgOutreach: p.dgOutreach === "attending" ? "attending" : "" };
+        }),
+        checkins: d.checkins.map((c) => ({ id: c.id, playerId: c.playerId, date: c.date, ts: c.ts, firstTime: c.firstTime, role: c.role, sitOut: c.sitOut, satellite: c.satellite || "", venue: c.venue || "" })),
+        rsvps: d.rsvps.filter((r) => r.date >= Logic.addDays(t, -1)), dgroups: d.dgroups.map((g) => ({ id: g.id, name: g.name, leader: g.leader || "" })),
+        settings: { name: d.settings.name, schedule: d.settings.schedule, satellites: d.settings.satellites, venueChanges: d.settings.venueChanges, gameDays: d.settings.gameDays, cover: d.settings.cover },
+        sessionCodes: auth.sessionCodes(), sheet: false, now: Date.now()
       };
     }
     d.players = d.players.map((p) => { const c = { ...p }; delete c.token; return c; });
@@ -125,7 +169,8 @@ module.exports = handler({
     const ops = Array.isArray(b.ops) ? b.ops.slice(0, 500) : [];
     const results = [];
     const newCheckins = [], newPlayers = [];
-    let players = null, checkinList = null;
+    let players = null, checkinList = null, settingsDoc = null;
+    const getSettings = async () => (settingsDoc = settingsDoc || (await db.get("settings", "main")) || {});
     const getPlayers = async () => (players = players || await db.all("players"));
     const getCheckins = async () => (checkinList = checkinList || await db.all("checkins"));
 
@@ -139,8 +184,10 @@ module.exports = handler({
           const patch = cleanPatch(op.patch || {});
           const existing = await db.get("players", id);
           if (volunteer) {
-            if (existing) throw fail(403, "Only leaders can edit player records.");
-            Object.keys(patch).forEach((k) => { if (!VOLUNTEER_CREATE_FIELDS.includes(k)) delete patch[k]; });
+            // Volunteers can sign up new players, and update the players they look after (not who leads them).
+            if (existing && !caresFor(existing, who.name, await getSettings())) throw fail(403, "Only leaders can edit players who aren't assigned to you.");
+            const allowed = existing ? VOLUNTEER_EDIT_FIELDS : VOLUNTEER_CREATE_FIELDS;
+            Object.keys(patch).forEach((k) => { if (!allowed.includes(k)) delete patch[k]; });
           }
           let codeChanged = null;
           if (!existing) {
@@ -166,7 +213,8 @@ module.exports = handler({
             if (!p) throw fail(404, "Player not found");
             const prior = list.some((c) => c.playerId === pid);
             const sat = Logic.SATELLITES.includes(r.satellite) ? r.satellite : (p.satellite || "");
-            const rec = { playerId: pid, date, ts: Number(r.ts) || Date.now(), firstTime: !prior, by: who.name, role: r.role === "volunteer" ? "volunteer" : "player", satellite: sat };
+            const venue = str(r.venue, 120) || (sat ? Logic.venueFor(await getSettings(), sat, date).gym : "");
+            const rec = { playerId: pid, date, ts: Number(r.ts) || Date.now(), firstTime: !prior, by: who.name, role: r.role === "volunteer" ? "volunteer" : "player", satellite: sat, venue };
             await db.put("checkins", cid, rec);
             list.push({ ...rec, id: cid });
             const upd = {};
@@ -180,7 +228,8 @@ module.exports = handler({
           const cid = str(op.id, 60), patch = {};
           if (typeof (op.patch || {}).sitOut === "boolean") patch.sitOut = op.patch.sitOut;
           if (["player", "volunteer"].includes((op.patch || {}).role)) patch.role = op.patch.role;
-          if (Logic.SATELLITES.includes((op.patch || {}).satellite)) patch.satellite = op.patch.satellite;
+          // only leaders move a check-in between satellites
+          if (!volunteer && Logic.SATELLITES.includes((op.patch || {}).satellite)) { patch.satellite = op.patch.satellite; patch.venue = str(op.patch.venue, 120); }
           if (await db.get("checkins", cid)) await db.patch("checkins", cid, patch);
           const list = await getCheckins(); const c = list.find((x) => x.id === cid); if (c) Object.assign(c, patch);
           results.push({ ok: true });
@@ -198,6 +247,8 @@ module.exports = handler({
           const sch = cleanSchedule(d.schedule); if (sch) patch.schedule = sch;
           const sats = cleanSatellites(d.satellites); if (sats) patch.satellites = sats;
           const vc = cleanVenueChanges(d.venueChanges); if (vc) patch.venueChanges = vc;
+          const gd = cleanGameDays(d.gameDays); if (gd) patch.gameDays = gd;
+          const cv = cleanCover(d.cover); if (cv) patch.cover = cv;
           await db.patch("settings", "main", patch);
           results.push({ ok: true });
         } else if (op.type === "deletePlayer") {

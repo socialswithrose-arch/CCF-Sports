@@ -34,6 +34,148 @@
   function dgName(id) { var g = D.dgroups.find(function (x) { return x.id === id; }); return g ? g.name : ""; }
   function fac(p) { return L.facilitatorOf(p, D.dgroups); }
   function initials(p) { return (((p.firstName || "?")[0] || "") + ((p.lastName || "")[0] || "")).toUpperCase(); }
+  /* D-group name with its D-group leader (separate from the small group lead in sports). */
+  function dgCell(p) { var n = dgName(p.dgroupId), l = L.dgroupLeaderOf(p, D.dgroups); return n ? esc(n) + (l ? '<div class="sub" style="margin:0">D-group leader: ' + esc(l) + "</div>" : "") : "—"; }
+  /* The satellite an "I'll play" answer is for: the one saved with it, else the player's home satellite. */
+  function rsvpSat(r) { if (r.satellite) return r.satellite; var p = D.players.find(function (x) { return x.id === r.playerId; }); return p ? (p.satellite || "") : ""; }
+  /* Line-up settings a satellite lead chose for one game day. */
+  function cfgFor(d, sat) { return L.gameConfig(D.settings, d, sat); }
+  function saveCfg(d, sat, patch) {
+    var gd = Object.assign({}, D.settings.gameDays || {}), k = L.gameKey(d, sat), cur = Object.assign({}, gd[k] || {}, patch);
+    Object.keys(cur).forEach(function (x) { if (cur[x] == null) delete cur[x]; });
+    gd[k] = cur; queue({ type: "settings", data: { gameDays: gd } });
+  }
+  /* Hand the viewer a file: through Claude's download prompt inside claude.ai, a normal browser download elsewhere. */
+  function saveFile(filename, blob) {
+    var viaClaude = window.claude && typeof window.claude.use === "function" ? window.claude.use("downloads").catch(function () { return null; }) : Promise.resolve(null);
+    return viaClaude.then(function (dl) {
+      if (dl) return dl.save({ filename: filename, data: blob }).then(function () { A.toast("Saved " + filename); }, function (e) { if (e && e.code !== "declined") A.toast("Couldn't save the file here"); });
+      var a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = filename; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(function () { URL.revokeObjectURL(a.href); }, 5000);
+    });
+  }
+  var libs = {};
+  function loadScript(src) { return libs[src] || (libs[src] = new Promise(function (ok, no) { var sc = document.createElement("script"); sc.src = src; sc.onload = ok; sc.onerror = function () { delete libs[src]; no(new Error("load")); }; document.head.appendChild(sc); })); }
+  var LIGHT = { "--bg": "#f4f2ee", "--surface": "#fcfcfb", "--surface-2": "#efece6", "--line": "#e2ded6", "--text": "#14130f", "--text-2": "#52514e", "--muted": "#6b6963", "--accent-soft": "#d4f1f4", "--accent-soft-ink": "#05505a", "--link": "#047785", "--navy": "#0b0d0e",
+    "--s1": "#2a78d6", "--s2": "#eb6834", "--f1": "#86b6ef", "--f2": "#6da7ec", "--f3": "#5598e7", "--f4": "#3987e5", "--f5": "#2a78d6", "--f6": "#1c5cab", "--f7": "#104281", "--good": "#1a7f37", "--good-soft": "#dcf3e2", "--good-ink": "#14532d", "--warn": "#9a6700", "--warn-soft": "#fff3cd", "--warn-ink": "#5c3b00", "--shadow": "none" };
+  /* The dashboard as an A4 PDF: a picture of each section, page breaks between sections, always in light colours. */
+  function dashboardPdf(btn) {
+    var main = $("main"); if (!main) return;
+    var old = btn.textContent; btn.disabled = true; btn.textContent = "Making PDF…";
+    var root = document.documentElement, opened = $$("details", main).filter(function (d) { return !d.open; });
+    var done = function () {
+      document.body.classList.remove("pdfmode"); Object.keys(LIGHT).forEach(function (k) { root.style.removeProperty(k); }); root.style.removeProperty("color-scheme");
+      opened.forEach(function (d) { d.open = false; }); btn.disabled = false; btn.textContent = old;
+    };
+    Promise.all([loadScript("https://cdn.jsdelivr.net/npm/html-to-image@1.11.13/dist/html-to-image.js"), loadScript("https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js")]).then(function () {
+      document.body.classList.add("pdfmode"); Object.keys(LIGHT).forEach(function (k) { root.style.setProperty(k, LIGHT[k]); }); root.style.setProperty("color-scheme", "light");
+      opened.forEach(function (d) { d.open = true; });
+      var top = main.getBoundingClientRect().top;
+      var breaks = Array.prototype.slice.call(main.children).map(function (el) { return el.getBoundingClientRect().bottom - top; });
+      var opts = { backgroundColor: LIGHT["--bg"], pixelRatio: 2, cacheBust: false };
+      return window.htmlToImage.toCanvas(main, opts).catch(function () { return window.htmlToImage.toCanvas(main, Object.assign({ skipFonts: true }, opts)); }).then(function (cv) { return { cv: cv, breaks: breaks, w: main.offsetWidth }; });
+    }).then(function (r) {
+      var PDF = window.PDFLib, ratio = r.cv.width / r.w, pageW = 595.28, pageH = 841.89, mar = 28, head = 22;
+      var scale = (pageW - mar * 2) / r.cv.width, maxH = Math.floor((pageH - mar * 2 - head) / scale);
+      var cuts = [0], y = 0, bs = r.breaks.map(function (b) { return Math.round(b * ratio); }).concat([r.cv.height]);
+      while (y < r.cv.height) {
+        var lim = y + maxH, fit = bs.filter(function (b) { return b > y + 40 && b <= lim; });
+        y = lim >= r.cv.height ? r.cv.height : fit.length ? fit[fit.length - 1] : lim;
+        cuts.push(y);
+      }
+      return PDF.PDFDocument.create().then(function (doc) {
+        return doc.embedFont(PDF.StandardFonts.Helvetica).then(function (font) {
+          var m = metrics(), title = (D.settings.name || "CCF Sports Ministry") + " - Dashboard - " + periodLabel(m) + (satFilter && satFilter !== "__none" ? " - " + satFilter : " - all satellites");
+          var chain = Promise.resolve(), n = cuts.length - 1;
+          cuts.slice(0, -1).forEach(function (c0, i) {
+            chain = chain.then(function () {
+              var h = cuts[i + 1] - c0, part = document.createElement("canvas"); part.width = r.cv.width; part.height = h;
+              part.getContext("2d").drawImage(r.cv, 0, c0, r.cv.width, h, 0, 0, r.cv.width, h);
+              return doc.embedPng(part.toDataURL("image/png")).then(function (img) {
+                var pg = doc.addPage([pageW, pageH]);
+                pg.drawText(title.replace(/[^\x20-\x7E]/g, "-"), { x: mar, y: pageH - mar - 10, size: 9, font: font });
+                pg.drawText("Page " + (i + 1) + " of " + n + "  |  made " + L.today(), { x: pageW - mar - 120, y: pageH - mar - 10, size: 8, font: font });
+                pg.drawImage(img, { x: mar, y: pageH - mar - head - h * scale, width: r.cv.width * scale, height: h * scale });
+              });
+            });
+          });
+          return chain.then(function () { return doc.save(); });
+        });
+      });
+    }).then(function (bytes) {
+      done();
+      return saveFile("ccf-dashboard-" + (period === "game" ? periodRange()[0] : L.today()) + (satFilter && satFilter !== "__none" ? "-" + satFilter.toLowerCase() : "") + ".pdf", new Blob([bytes], { type: "application/pdf" }));
+    }, function (e) { done(); console.error(e); A.toast("Couldn't make the PDF. Check the internet connection and try again."); });
+  }
+
+  /* Cover for a game day: { date: { playerId: "Name" } }. The player's usual small group lead stays the same. */
+  function coverMap(d) { return ((D.settings.cover || {})[d]) || {}; }
+  function leadOn(p, d) { return coverMap(d)[p.id] || p.facilitator || ""; }
+  function nameIs(n, me) { n = String(n || "").trim().toLowerCase(); return !!me && !!n && (n === me || n.indexOf(me + " ") === 0); }
+  function isMyPlayer(p, me, d) { if (!me || p.volunteer) return false; return nameIs(p.facilitator, me) || nameIs(coverMap(d)[p.id], me); }
+  /* Who can cover: ministry leaders, volunteers, and anyone signed up who is already in a D-group. People here today come first. */
+  function coverOptions(d) {
+    var here = new Set(D.checkins.filter(function (c) { return c.date === d; }).map(function (c) { return c.playerId; })), seen = {}, out = [];
+    var add = function (n, k, h) { if (!n || seen[n.toLowerCase()]) return; seen[n.toLowerCase()] = 1; out.push({ n: n, k: k, here: h }); };
+    D.players.forEach(function (p) { if (p.volunteer) add(L.fullName(p), "volunteer", here.has(p.id)); });
+    (D.settings.leaders || []).forEach(function (n) { add(n, "leader", false); });
+    D.players.forEach(function (p) { if (!p.volunteer && (p.dgroupId || p.churchStatus === L.CHURCH[0] || p.dgOutreach === "attending")) add(L.fullName(p), "in a D-group", here.has(p.id)); });
+    var rank = { volunteer: 0, leader: 1, "in a D-group": 2 };
+    return out.sort(function (a, b) { return (b.here - a.here) || rank[a.k] - rank[b.k] || a.n.localeCompare(b.n); });
+  }
+  function coverSelect(attrs, d, current, blankLabel) {
+    return "<select " + attrs + ">" + '<option value="">' + esc(blankLabel) + "</option>" + coverOptions(d).map(function (o) { return '<option value="' + esc(o.n) + '"' + (o.n === current ? " selected" : "") + ">" + esc(o.n) + " · " + o.k + (o.here ? " · here" : "") + "</option>"; }).join("") + "</select>";
+  }
+  function coverCard(d) {
+    var leads = {};
+    D.players.forEach(function (p) { if (!p.volunteer && p.facilitator) (leads[p.facilitator] = leads[p.facilitator] || []).push(p); });
+    var here = new Set(D.checkins.filter(function (c) { return c.date === d; }).map(function (c) { return c.playerId; }));
+    var names = Object.keys(leads).sort(function (a, b) { return a.localeCompare(b); });
+    if (!names.length) return "";
+    var cm = coverMap(d);
+    return '<div class="card" style="margin-top:12px"><h3>Small group leads today</h3><div class="sub">If a lead can\'t make it, hand their players to a volunteer, a leader, or a player who\'s already in a D-group. It\'s just for that day unless you make it permanent.</div><div class="table-wrap"><table class="t"><thead><tr><th>Lead</th><th class="num">Players</th><th class="num">Here today</th><th>Today</th><th></th></tr></thead><tbody>' +
+      names.map(function (n) {
+        var ps = leads[n], cov = ps.filter(function (p) { return cm[p.id]; }), who = Array.from(new Set(cov.map(function (p) { return cm[p.id]; })));
+        return "<tr><td><b>" + esc(n) + '</b></td><td class="num">' + ps.length + '</td><td class="num">' + ps.filter(function (p) { return here.has(p.id); }).length + "</td><td>" + (cov.length ? '<span class="pill warn">' + cov.length + " covered by " + esc(who.join(", ")) + "</span>" : '<span class="sub" style="margin:0">Leading</span>') + '</td><td><button class="btn small" data-cover="' + esc(n) + '">' + (cov.length ? "Change" : "Away? Hand over") + "</button></td></tr>";
+      }).join("") + "</tbody></table></div></div>";
+  }
+  function bindCover(root, d) { $$("[data-cover]", root).forEach(function (b) { b.onclick = function () { openCover(b.dataset.cover, d); }; }); }
+  function openCover(lead, d0) {
+    if (isVol()) return A.toast("Only leaders can change who leads players");
+    var ng = L.nextGame(D.settings, L.today(), curSat || ""), d = d0 || (ng ? ng.date : L.today());
+    var ps = D.players.filter(function (p) { return !p.volunteer && p.facilitator === lead; }).sort(function (a, b) { return L.fullName(a).localeCompare(L.fullName(b)); });
+    var here = new Set(D.checkins.filter(function (c) { return c.date === d; }).map(function (c) { return c.playerId; }));
+    var draw = function () {
+      var cm = coverMap(d);
+      A.modal('<div class="mhead"><h3>Hand over ' + esc(lead) + '\'s players</h3><button class="btn small ghost x" data-close aria-label="Close">✕</button></div>' +
+        '<div class="grid2 stack"><div><label class="f" for="cvDate">For the game on</label><input type="date" class="input" id="cvDate" value="' + esc(d) + '"></div>' +
+        '<div><label class="f" for="cvAll">Give all ' + ps.length + " to</label>" + coverSelect('class="input" id="cvAll"', d, "", "Pick someone…") + "</div></div>" +
+        '<div class="sub" style="margin:8px 0">Or split them between people:</div><div class="stackv" style="gap:6px">' + ps.map(function (p) {
+          return '<div class="lu" style="background:var(--surface-2)"><span class="lu-nm">' + esc(L.fullName(p)) + (here.has(p.id) ? ' <span class="pill good">here</span>' : "") + "</span>" + coverSelect('class="input" data-cv="' + esc(p.id) + '" style="width:auto;max-width:230px;min-height:36px;font-size:13px"', d, cm[p.id] || "", "Keep with " + lead) + "</div>";
+        }).join("") + "</div>" +
+        '<label class="toggle" style="margin-top:10px"><input type="checkbox" id="cvPerm"> Make it permanent (change their small group lead)</label>' +
+        '<div class="sub" style="margin:4px 0 0">Whoever covers sees these players under <b>My players</b> when they sign in with the volunteer password using that name.</div>' +
+        '<div class="mfoot"><button class="btn small ghost" id="cvClear">Clear cover</button><span class="sp"></span><button class="btn" data-close>Cancel</button><button class="btn primary" id="cvSave">Save</button></div>', { noFocus: true });
+      $$("#modalRoot option").forEach(function (o) { if (o.value && o.value.toLowerCase() === lead.toLowerCase()) o.remove(); });
+      $("#cvDate").onchange = function () { if (this.value) { d = this.value; draw(); } };
+      $("#cvAll").onchange = function () { var v = this.value; if (v) $$("[data-cv]").forEach(function (s2) { s2.value = v; }); };
+      var save = function (clear) {
+        var all = Object.assign({}, D.settings.cover || {}), cm2 = Object.assign({}, all[d] || {}), perm = !clear && $("#cvPerm").checked;
+        $$("[data-cv]").forEach(function (s2) {
+          var pid = s2.dataset.cv, v = clear ? "" : s2.value;
+          if (perm && v) { queue({ type: "player", id: pid, patch: { facilitator: v } }); delete cm2[pid]; }
+          else if (v) cm2[pid] = v; else delete cm2[pid];
+        });
+        all[d] = cm2; if (!Object.keys(cm2).length) delete all[d];
+        queue({ type: "settings", data: { cover: all } });
+        A.closeModal(); A.toast(clear ? "Cover cleared" : perm ? "Small group lead changed" : "Cover saved for " + A.fmt(d)); refreshView();
+      };
+      $("#cvSave").onclick = function () { save(false); };
+      $("#cvClear").onclick = function () { save(true); };
+    };
+    draw();
+  }
+  function luFor(d, sat) { return L.lineup(D.checkins.filter(function (c) { return c.date === d && satOfCheckin(c) === sat; }), playersMap(), cfgFor(d, sat)); }
 
   function applyLocal(op) {
     if (op.type === "player") {
@@ -102,6 +244,9 @@
   window.addEventListener("online", function () { status.online = true; scheduleSync(500); });
   window.addEventListener("offline", function () { status.online = false; paintStatus(); });
   setInterval(function () { if (auth() && document.visibilityState === "visible") sync(); }, 60000);
+  setInterval(function () { var pth = A.parseHash().path; if (auth() && document.visibilityState === "visible" && /\/(dashboard|lineup)$/.test(pth) && !status.syncing) sync(); }, 20000);
+  // the preview's view switcher (and coming back to the app) asks for fresh data
+  window.addEventListener("ccf:resync", function () { D.fetchedAt = 0; if (auth()) scheduleSync(50); });
 
   function statusHTML() {
     var n = outbox.length;
@@ -118,10 +263,11 @@
 
   /* ---------------- shell ---------------- */
   var NAVALL = [["scan", "Scan", I.scan], ["lineup", "Line-up", I.list], ["followup", "Follow-up", I.todo], ["dashboard", "Dashboard", I.chart], ["players", "Players", I.people], ["settings", "Settings", I.gear]];
+  var NAVVOL = [["scan", "Scan", I.scan], ["lineup", "Line-up", I.list], ["mine", "My players", I.people]];
   function lshell(active, body, opts) {
     opts = opts || {};
     var a = auth();
-    var NAV = isVol() ? NAVALL.slice(0, 2) : NAVALL;
+    var NAV = isVol() ? NAVVOL : NAVALL;
     var tabs = NAV.map(function (n) { return '<a href="#/leader/' + n[0] + '" aria-current="' + (n[0] === active ? "page" : "false") + '">' + n[1] + "</a>"; }).join("");
     var bottom = NAV.map(function (n) { return '<a href="#/leader/' + n[0] + '" aria-current="' + (n[0] === active ? "page" : "false") + '">' + icon(n[2], 22, "currentColor") + "<span>" + n[1] + "</span></a>"; }).join("");
     $("#app").innerHTML = '<header class="topbar"><div class="topbar-in"><a class="brand" href="#/leader/scan">' + A.ball(28) + "<span>" + esc(D.settings.name || "CCF Sports Ministry") + "<small>" + (isVol() ? "Volunteer" : "Leaders") + " · " + esc(a ? a.name : "") + "</small></span></a>" +
@@ -166,7 +312,7 @@
     var t = L.today(), tn = D.checkins.filter(function (c) { return c.date === t && (!curSat || satOfCheckin(c) === curSat); });
     var pl = tn.filter(function (c) { return c.role !== "volunteer"; });
     var here = new Set(tn.map(function (c) { return c.playerId; }));
-    var yes = (D.rsvps || []).filter(function (r) { return r.date === t && r.going && (!curSat || !r.satellite || r.satellite === curSat); });
+    var yes = (D.rsvps || []).filter(function (r) { return r.date === t && r.going && (!curSat || rsvpSat(r) === curSat); });
     return { players: pl.length, firsts: pl.filter(function (c) { return c.firstTime; }).length, vols: tn.length - pl.length, yes: yes.length, yesHere: yes.filter(function (r) { return here.has(r.playerId); }).length };
   }
   function statsHTML() {
@@ -178,8 +324,9 @@
     var t = L.today();
     lshell("scan",
       '<div class="stackv" style="max-width:560px;margin:0 auto">' +
-      '<div class="satbar"><span>Satellite</span>' + satSeg("satSeg", curSat, false) + "</div>" +
-      (curSat ? "" : '<div class="banner warn">Choose which satellite you\'re checking in for. This phone remembers it.</div>') +
+      (isVol() && curSat ? '<div class="satbar"><span>Checking in for</span><b style="color:var(--text)">' + esc(curSat) + '</b><button type="button" class="btn small ghost" id="satChange">Change</button></div>'
+        : '<div><div class="kicker2" style="margin-bottom:6px">Check players in at</div><div class="gympick" id="satSeg">' + L.SATELLITES.map(function (k) { var v = L.venueFor(D.settings, k, t); return '<button type="button" data-sat="' + k + '" aria-pressed="' + (curSat === k) + '"><b>' + esc(k) + "</b><span>" + esc(v.gym || "Gym not set") + (v.time ? " · " + esc(L.fmtTime(v.time)) : "") + "</span></button>"; }).join("") + "</div></div>") +
+      (curSat ? '<div class="sub" style="margin:0">Everyone checked in on this phone is recorded as playing at <b>' + esc(curSat) + "</b> today, even if their home satellite is different.</div>" : '<div class="banner warn">Choose which satellite you\'re checking in for. This phone remembers it.</div>') +
       '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><div><div class="kicker2">' + (L.isGameDay(D.settings, t) ? "Game day" : "Check-in") + (curSat ? " · " + esc(curSat) : "") + '</div><h2 style="font-size:28px;font-weight:800;text-transform:uppercase">' + esc(A.fmt(t)) + '</h2><div id="vline">' + venueLine(t) + '</div></div>' +
       '<a class="btn small" style="margin-left:auto" href="#/leader/tonight">' + icon(I.scan, 16, "currentColor") + " Show " + L.dayName(t) + "'s QR</a></div>" +
       '<div class="seg" role="tablist" aria-label="Check-in method" style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr))">' +
@@ -193,6 +340,7 @@
       "</div>");
     $$("[data-tab]").forEach(function (b) { b.onclick = function () { scanTab = b.dataset.tab; A.routes["/leader/scan"](); }; });
     $$("#satSeg button").forEach(function (b) { b.onclick = function () { setSat(b.dataset.sat); A.routes["/leader/scan"](); }; });
+    var sc = $("#satChange"); if (sc) sc.onclick = function () { if (window.confirm("Check-ins on this phone are recorded at the satellite you pick. Change it?")) { setSat(""); A.routes["/leader/scan"](); } };
     $$("#roleSeg button").forEach(function (b) { b.onclick = function () { scanRole = b.dataset.r; $$("#roleSeg button").forEach(function (x) { x.setAttribute("aria-pressed", x === b); }); }; });
     paintLastScan();
     var body = $("#tabBody");
@@ -210,6 +358,7 @@
       paintStatus();
       var ts = $("#tonightStats"); if (ts) ts.innerHTML = statsHTML();
       var vl = $("#vline"); if (vl) vl.innerHTML = venueLine(L.today());
+      $$("#satSeg button[data-sat]").forEach(function (b) { var sp = b.querySelector("span"), v = L.venueFor(D.settings, b.dataset.sat, L.today()); if (sp) sp.textContent = (v.gym || "Gym not set") + (v.time ? " · " + L.fmtTime(v.time) : ""); });
     };
   };
 
@@ -248,7 +397,8 @@
     var t = L.today();
     var existing = D.checkins.find(function (c) { return c.playerId === id && c.date === t; });
     var role = forceRole || (p.volunteer ? "volunteer" : scanRole);
-    if (!existing) queue({ type: "checkin", rec: { playerId: id, date: t, ts: Date.now(), role: role, satellite: curSat || p.satellite || "" } });
+    var sat = curSat || p.satellite || "";
+    if (!existing) queue({ type: "checkin", rec: { playerId: id, date: t, ts: Date.now(), role: role, satellite: sat, venue: sat ? L.venueFor(D.settings, sat, t).gym : "" } });
     var visits = (L.visitsByPlayer(D.checkins).get(id) || []);
     var ck = D.checkins.find(function (c) { return c.playerId === id && c.date === t; });
     lastScan = { id: id, already: !!existing, n: visits.length, att: L.attendanceOf(visits), first: !!(ck && ck.firstTime), role: ck ? ck.role : role };
@@ -260,7 +410,7 @@
   function spotText(playerId) {
     var t = L.today(), mine = D.checkins.find(function (c) { return c.date === t && c.playerId === playerId; });
     var sat = mine ? satOfCheckin(mine) : "";
-    var lu = L.lineup(D.checkins.filter(function (c) { return c.date === t && satOfCheckin(c) === sat; }));
+    var lu = luFor(t, sat);
     var me = lu.find(function (x) { return x.checkin.playerId === playerId; });
     if (!me) return "Sitting out today";
     return me.game === 1 ? "Plays in Game 1 · Team " + me.team : "Game " + me.game + " · Team " + me.team + " (#" + me.n + " in line)";
@@ -274,6 +424,18 @@
     el.innerHTML = (lastScan.first ? '<div class="firstbanner">' + icon(I.star, 22, "currentColor") + "<span><b>First time here!</b> Welcome " + esc(p.firstName) + ' and introduce them to a leader. They play first.</span></div>' : "") +
       '<div class="lastscan"><div class="ok">' + icon(I.check, 22, "#fff", 3) + '</div><div style="flex:1;min-width:0"><div style="font-weight:700;display:flex;gap:6px;align-items:center;flex-wrap:wrap">' + esc(L.fullName(p)) + (lastScan.already ? " was already in" : " checked in") + " " + badge + '</div><div class="sub" style="margin:0">' +
       esc(spotText(p.id)) + (lastScan.first ? "" : " · Visit #" + lastScan.n) + (action ? " · ⚑ " + esc(action) : "") + "</div></div>" + (isVol() ? "" : '<button class="btn small" data-open="' + esc(p.id) + '">Open</button>') + "</div>";
+    var ck = D.checkins.find(function (c) { return c.playerId === p.id && c.date === L.today(); });
+    if (ck && !isVol()) {
+      var at = satOfCheckin(ck);
+      el.insertAdjacentHTML("beforeend", '<div class="lastsat">Checked in at <b style="color:var(--text)">' + esc(at || "no satellite") + (ck.venue ? " (" + esc(ck.venue) + ")" : "") + "</b>" +
+        L.SATELLITES.filter(function (k) { return k !== at; }).map(function (k) { return '<button class="btn small" data-movesat="' + k + '">Change to ' + esc(k) + "</button>"; }).join("") + "</div>");
+      $$("[data-movesat]", el).forEach(function (b) { b.onclick = function () {
+        var k = b.dataset.movesat;
+        queue({ type: "checkinPatch", id: ck.id, patch: { satellite: k, venue: L.venueFor(D.settings, k, ck.date).gym } });
+        A.toast(L.fullName(p) + " now counts at " + k + " today"); paintLastScan();
+        var ts = $("#tonightStats"); if (ts) ts.innerHTML = statsHTML();
+      }; });
+    }
     var o = $("[data-open]", el); if (o) o.onclick = function () { openPlayer(p.id); };
   }
 
@@ -281,7 +443,7 @@
   A.routes["/leader/lineup"] = function () {
     if (needAuth()) return;
     lshell("lineup", '<div style="max-width:760px;margin:0 auto"><div class="dash-head"><div><div class="kicker2">' + esc(A.fmt(L.today())) + (curSat ? " · " + esc(curSat) : "") + '</div><h2>' + esc(L.dayName()) + '\'s line-up</h2><div id="vline">' + venueLine(L.today()) + '</div></div><div class="right">' + satSeg("luSat", curSat, false) + "</div></div>" +
-      '<p class="sub" style="font-size:14px">First-timers play first, then players in the order they arrived. Volunteers fill any spots left. Games of 10 (5 v 5).</p><div id="luBody"></div></div>');
+      '<div class="prio"><b>Who plays first</b><ol>' + ["First-timers", "Attendees", "CCF churchgoers with no D-group", "D-group attendees", "Volunteers, once everyone has played"].map(function (x) { return "<li>" + esc(x) + "</li>"; }).join("") + "</ol>Arrival time breaks ties." + (isVol() ? "" : " Leaders can change the order, the players per game and the number of games.") + '</div><div id="luCfg"></div><div id="luBody"></div></div>');
     $$("#luSat button").forEach(function (b) { b.onclick = function () { setSat(b.dataset.sat); A.routes["/leader/lineup"](); }; });
     paintLineup();
     currentRefresh = paintLineup;
@@ -289,31 +451,52 @@
   function paintLineup() {
     var box = $("#luBody"); if (!box) return;
     var vl = $("#vline"); if (vl) vl.innerHTML = venueLine(L.today());
-    var t = L.today(), pm = playersMap(), tn = D.checkins.filter(function (c) { return c.date === t && (!curSat || satOfCheckin(c) === curSat); });
-    if (!curSat) { box.innerHTML = '<div class="empty">Choose a satellite above to see its line-up.</div>'; return; }
-    var lu = L.lineup(tn);
+    var t = L.today(), pm = playersMap(), canEdit = !isVol(), cb = $("#luCfg");
+    if (!curSat) { box.innerHTML = '<div class="empty">Choose a satellite above to see its line-up.</div>'; if (cb) cb.innerHTML = ""; return; }
+    var tn = D.checkins.filter(function (c) { return c.date === t && satOfCheckin(c) === curSat; });
+    var cfg = cfgFor(t, curSat), per = parseInt(cfg.perGame, 10) || 10, lu = L.lineup(tn, pm, cfg);
+    var size = lu.length ? lu[0].size : per, games = lu.length ? lu[lu.length - 1].game : 0, manual = !!(cfg.order && cfg.order.length);
+    var summary = lu.length + " playing · " + games + (games === 1 ? " game" : " games") + " of " + (cfg.games > 0 ? "about " : "") + size + " (" + Math.floor(size / 2) + " v " + Math.ceil(size / 2) + ")";
+    if (cb) cb.innerHTML = canEdit ? '<div class="card lucfg"><label>Players per game<select class="input" id="cfgPer">' + [6, 8, 10, 12, 14, 16].map(function (n) { return "<option" + (n === per ? " selected" : "") + ">" + n + "</option>"; }).join("") + "</select></label>" +
+      '<label>Number of games<select class="input" id="cfgGames"><option value="0">Auto (' + Math.max(1, Math.ceil(lu.length / per)) + ")</option>" + [1, 2, 3, 4, 5, 6, 7, 8].map(function (n) { return '<option value="' + n + '"' + (+cfg.games === n ? " selected" : "") + ">" + n + "</option>"; }).join("") + "</select></label>" +
+      '<div class="sub" style="margin:0">' + esc(summary) + (manual ? ' · <b>order changed by hand</b> <button class="btn small ghost" id="cfgReset">Back to automatic order</button>' : "") + "</div></div>"
+      : '<p class="sub" style="font-size:14px">' + esc(summary) + "</p>";
+    var ids = lu.map(function (x) { return x.checkin.id; });
     var row = function (x) {
-      var p = pm.get(x.checkin.playerId) || {}, c = x.checkin;
-      var tag = c.firstTime && c.role !== "volunteer" ? '<span class="pill new">First time</span>' : c.role === "volunteer" ? '<span class="pill">Volunteer</span>' : "";
-      return '<li class="lu"><span class="lu-n">' + x.n + '</span><span class="lu-nm">' + esc(L.fullName(p)) + " " + tag + '</span><button class="btn small ghost" data-sit="' + esc(c.id) + '">Sit out</button></li>';
+      var p = pm.get(x.checkin.playerId) || {}, c = x.checkin, i = x.n - 1;
+      var tag = x.priority === 0 ? '<span class="pill new">First time</span>' : x.priority === 4 ? '<span class="pill">Volunteer</span>' : '<span class="pill" style="font-weight:500">' + esc(L.PRIORITY[x.priority]) + "</span>";
+      var ctl = canEdit ? '<span class="lu-ctl"><button class="btn small ghost" data-up="' + i + '" aria-label="Move up"' + (i === 0 ? " disabled" : "") + '>↑</button><button class="btn small ghost" data-down="' + i + '" aria-label="Move down"' + (i === ids.length - 1 ? " disabled" : "") + ">↓</button>" +
+        '<select class="input" data-mv="' + i + '" aria-label="Move to game">' + Array.from({ length: games + 1 }, function (_, g) { return '<option value="' + (g + 1) + '"' + (g + 1 === x.game ? " selected" : "") + ">Game " + (g + 1) + "</option>"; }).join("") + "</select>" +
+        '<button class="btn small ghost" data-sit="' + esc(c.id) + '">Sit out</button></span>' : "";
+      return '<li class="lu"><span class="lu-n">' + x.n + '</span><span class="lu-nm">' + esc(L.fullName(p)) + " " + tag + "</span>" + ctl + "</li>";
     };
     var html = "";
     if (!lu.length) html = '<div class="empty">No one checked in yet today.</div>';
-    var games = {};
-    lu.forEach(function (x) { (games[x.game] = games[x.game] || []).push(x); });
-    Object.keys(games).forEach(function (g) {
-      var list = games[g], full = list.length === 10;
-      html += '<div class="card" style="margin-bottom:12px"><h3>Game ' + g + (g === "1" ? " · first on court" : "") + (full ? "" : ' <span class="pill warn">' + list.length + " of 10</span>") + '</h3><div class="teams">' +
+    var byGame = {};
+    lu.forEach(function (x) { (byGame[x.game] = byGame[x.game] || []).push(x); });
+    Object.keys(byGame).forEach(function (g) {
+      var list = byGame[g], full = list.length >= size;
+      html += '<div class="card" style="margin-bottom:12px"><h3>Game ' + g + (g === "1" ? " · first on court" : "") + (full ? "" : ' <span class="pill warn">' + list.length + " of " + size + "</span>") + '</h3><div class="teams">' +
         ["A", "B"].map(function (tm) { return '<div><div class="kicker2" style="margin:8px 0 6px">Team ' + tm + '</div><ol class="lulist">' + list.filter(function (x) { return x.team === tm; }).map(row).join("") + "</ol></div>"; }).join("") + "</div></div>";
     });
     var out = tn.filter(function (c) { return c.sitOut; });
-    if (out.length) html += '<div class="card" style="margin-bottom:12px"><h3>Sitting out</h3><ol class="lulist">' + out.map(function (c) { var p = pm.get(c.playerId) || {}; return '<li class="lu"><span class="lu-nm">' + esc(L.fullName(p)) + '</span><button class="btn small" data-back="' + esc(c.id) + '">Back in</button></li>'; }).join("") + "</ol></div>";
+    if (out.length) html += '<div class="card" style="margin-bottom:12px"><h3>Sitting out</h3><ol class="lulist">' + out.map(function (c) { var p = pm.get(c.playerId) || {}; return '<li class="lu"><span class="lu-nm">' + esc(L.fullName(p)) + "</span>" + (canEdit ? '<button class="btn small" data-back="' + esc(c.id) + '">Back in</button>' : "") + "</li>"; }).join("") + "</ol></div>";
     var here = new Set(tn.map(function (c) { return c.playerId; }));
-    var waiting = (D.rsvps || []).filter(function (r) { return r.date === t && r.going && !here.has(r.playerId) && (!r.satellite || r.satellite === curSat); });
+    var allHere = new Set(D.checkins.filter(function (c) { return c.date === t; }).map(function (c) { return c.playerId; }));
+    var waiting = (D.rsvps || []).filter(function (r) { return r.date === t && r.going && !allHere.has(r.playerId) && rsvpSat(r) === curSat; });
     if (waiting.length) html += '<div class="card"><h3>Said "I\'ll play", not here yet</h3><div class="sub">' + waiting.length + ' players</div><div class="choices">' + waiting.map(function (r) { var p = pm.get(r.playerId); return p ? '<span class="pill">' + esc(L.fullName(p)) + "</span>" : ""; }).join("") + "</div></div>";
+    if (canEdit) html += coverCard(t);
     box.innerHTML = html;
+    if (canEdit) bindCover(box, t);
+    var setOrder = function (next) { saveCfg(t, curSat, { order: next }); paintLineup(); };
+    $$("[data-up]", box).forEach(function (b) { b.onclick = function () { var i = +b.dataset.up, n = ids.slice(); n.splice(i - 1, 2, n[i], n[i - 1]); setOrder(n); }; });
+    $$("[data-down]", box).forEach(function (b) { b.onclick = function () { var i = +b.dataset.down, n = ids.slice(); n.splice(i, 2, n[i + 1], n[i]); setOrder(n); }; });
+    $$("[data-mv]", box).forEach(function (sel) { sel.onchange = function () { var i = +sel.dataset.mv, g = +sel.value, n = ids.slice(), id = n.splice(i, 1)[0]; n.splice(Math.min(g * size - 1, n.length), 0, id); setOrder(n); }; });
     $$("[data-sit]", box).forEach(function (b) { b.onclick = function () { queue({ type: "checkinPatch", id: b.dataset.sit, patch: { sitOut: true } }); paintLineup(); }; });
     $$("[data-back]", box).forEach(function (b) { b.onclick = function () { queue({ type: "checkinPatch", id: b.dataset.back, patch: { sitOut: false } }); paintLineup(); }; });
+    var cp = $("#cfgPer"); if (cp) cp.onchange = function () { saveCfg(t, curSat, { perGame: +cp.value }); paintLineup(); };
+    var cg = $("#cfgGames"); if (cg) cg.onchange = function () { saveCfg(t, curSat, { games: +cg.value || null }); paintLineup(); };
+    var cr = $("#cfgReset"); if (cr) cr.onclick = function () { saveCfg(t, curSat, { order: null }); paintLineup(); };
   }
 
   function newPlayerForm(box) {
@@ -350,7 +533,8 @@
       var patch = { firstName: f, lastName: l, phone: ph, email: $("#np-email").value.trim(), location: $("#np-loc").value.trim(), lifeStage: life(), invitedBy: $("#np-inv").value.trim(),
         wantsConnect: role() === "Volunteer" ? "" : want(), contactOk: $("#np-ok").checked, volunteer: role() === "Volunteer", churchStatus: role() === "Volunteer" ? "" : church(), satellite: L.satFromLabel(npSat()) || curSat, code: newCode(), firstVisit: t, stage: "new", stageDates: { "new": t }, dgroupId: "", dgroupDate: "", followedUp: false, notes: "", createdAt: Date.now(), source: "leader" };
       queue({ type: "player", id: id, patch: patch });
-      queue({ type: "checkin", rec: { playerId: id, date: t, ts: Date.now(), role: role() === "Volunteer" ? "volunteer" : "player", satellite: curSat || L.satFromLabel(npSat()) } });
+      var nsat = curSat || L.satFromLabel(npSat());
+      queue({ type: "checkin", rec: { playerId: id, date: t, ts: Date.now(), role: role() === "Volunteer" ? "volunteer" : "player", satellite: nsat, venue: nsat ? L.venueFor(D.settings, nsat, t).gym : "" } });
       var p = playersMap().get(id);
       A.modal('<div class="mhead"><h3>Welcome, ' + esc(f) + '!</h3><button class="btn small ghost x" data-close aria-label="Close">✕</button></div>' +
         '<p style="margin-top:0">Checked in. Ask them to <b>take a photo of this QR</b>. Next time they just show it.</p>' +
@@ -376,7 +560,23 @@
   };
 
   /* ---------------- dashboard ---------------- */
-  var period = "month";
+  var period = "month", pFrom = "", pTo = "", pGame = "";
+  function gameDates() {
+    var set = new Set(D.checkins.filter(function (c) { return !satFilter || satOfCheckin(c) === satFilter; }).map(function (c) { return c.date; }));
+    return Array.from(set).sort().reverse();
+  }
+  /* [from, to] for the chosen period. */
+  function periodRange() {
+    var t = L.today();
+    if (period === "custom") { var a = pFrom || periodStart("all"), b = pTo || t; return a <= b ? [a, b] : [b, a]; }
+    if (period === "game") { var g = pGame || gameDates()[0] || t; return [g, g]; }
+    return [periodStart(period), t];
+  }
+  function periodLabel(m) {
+    if (period === "custom") return A.fmt(m.a) + " to " + A.fmt(m.b);
+    if (period === "game") return "Game on " + A.fmt(m.a);
+    return { month: "This month", "3m": "In the last 3 months", year: "This year", all: "So far" }[period];
+  }
   function periodStart(p) {
     var t = L.today(), y = +t.slice(0, 4), m = +t.slice(5, 7);
     function first(yy, mm) { while (mm < 1) { mm += 12; yy--; } return yy + "-" + String(mm).padStart(2, "0") + "-01"; }
@@ -389,14 +589,16 @@
   function inRange(d, a, b) { return !!d && d >= a && d <= b; }
   var pct = function (n, d) { return d ? Math.round(100 * n / d) : 0; };
   function metrics() {
-    var a = periodStart(period), b = L.today(), vbp = L.visitsByPlayer(D.checkins), pm = playersMap();
-    var PL = satFilter ? D.players.filter(function (p) { return p.satellite === satFilter; }) : D.players;
+    var rg = periodRange(), a = rg[0], b = rg[1], vbp = L.visitsByPlayer(D.checkins), pm = playersMap();
     var inSat = function (c) { return !satFilter || satOfCheckin(c) === satFilter; };
     var allIn = D.checkins.filter(function (c) { return inRange(c.date, a, b) && inSat(c); });
+    // with a satellite chosen, the report is about the people who checked in THERE in this period
+    var attIds = new Set(allIn.map(function (c) { return c.playerId; }));
+    var PL = satFilter ? D.players.filter(function (p) { return attIds.has(p.id); }) : D.players;
     var cin = allIn.filter(function (c) { return c.role !== "volunteer"; });
     var vols = new Set(allIn.filter(function (c) { return c.role === "volunteer"; }).map(function (c) { return c.playerId; }));
     var uniq = new Set(cin.map(function (c) { return c.playerId; }));
-    var firsts = PL.filter(function (p) { return inRange(p.firstVisit, a, b); });
+    var firsts = satFilter ? PL.filter(function (p) { return allIn.some(function (c) { return c.playerId === p.id && c.firstTime; }); }) : PL.filter(function (p) { return inRange(p.firstVisit, a, b); });
     var returning = new Set(cin.filter(function (c) { var p = pm.get(c.playerId); return p && c.date !== p.firstVisit; }).map(function (c) { return c.playerId; }));
     var cameBack = firsts.filter(function (p) { return (vbp.get(p.id) || []).length >= 2; });
     return {
@@ -411,21 +613,28 @@
   A.routes["/leader/dashboard"] = function () {
     if (needAuth(true)) return;
     lshell("dashboard",
-      '<div class="dash-head"><div><div class="kicker2">Leaders\' report</div><h2>Ministry dashboard</h2></div><div class="right"><div class="seg" id="periodSeg">' +
-      [["month", "This month"], ["3m", "Last 3 months"], ["year", "This year"], ["all", "All time"]].map(function (x) { return '<button data-p="' + x[0] + '" aria-pressed="' + (period === x[0]) + '">' + x[1] + "</button>"; }).join("") +
+      '<div class="dash-head"><div><div class="kicker2">Leaders\' report</div><h2>Ministry dashboard</h2></div><div class="right noprint"><button class="btn small primary" id="pdfBtn">Download PDF</button><div class="seg" id="periodSeg">' +
+      [["month", "This month"], ["3m", "Last 3 months"], ["year", "This year"], ["all", "All time"], ["custom", "Pick dates"], ["game", "One game"]].map(function (x) { return '<button data-p="' + x[0] + '" aria-pressed="' + (period === x[0]) + '">' + x[1] + "</button>"; }).join("") +
       "</div></div></div>" +
-      '<div class="filters">' + satSeg("dashSat", satFilter, true) + "</div>" +
-      '<div class="headline" id="headline"></div><div class="kpis" id="kpis"></div>' +
+      (period === "custom" ? '<div class="periodpick filters noprint"><label>From <input type="date" class="input" id="pFrom" value="' + esc(pFrom || periodRange()[0]) + '"></label><label>To <input type="date" class="input" id="pTo" value="' + esc(pTo || L.today()) + '"></label></div>' : "") +
+      (period === "game" ? '<div class="periodpick filters noprint"><label>Game date <select class="input" id="pGame">' + gameDates().slice(0, 60).map(function (d) { return '<option value="' + d + '"' + (d === periodRange()[0] ? " selected" : "") + ">" + esc(A.fmt(d)) + (L.parse(d).getUTCFullYear() !== L.parse(L.today()).getUTCFullYear() ? " " + d.slice(0, 4) : "") + "</option>"; }).join("") + "</select></label></div>" : "") +
+      '<div class="filters noprint">' + satSeg("dashSat", satFilter, true) + "</div>" +
+      '<div class="card" id="nextGames" style="margin-bottom:16px"></div><div class="card" id="gameDay" style="margin-bottom:16px"></div><div class="headline" id="headline"></div><div class="kpis" id="kpis"></div>' +
       '<div class="row"><div class="card"><h3>Attendance</h3><div class="sub" id="attSub"></div><div class="legend"><span><i style="background:var(--s2)"></i>First-timers</span><span><i style="background:var(--s1)"></i>Returning</span></div><div class="chart" id="attChart"></div></div>' +
       '<div class="card"><h3>Faith journey</h3><div class="sub" id="funnelSub"></div><div class="funnel" id="funnel"></div></div></div>' +
       '<div class="row even"><div class="card"><h3>Where everyone is now</h3><div class="sub">Current faith step of players who came in this period</div><div class="funnel" id="stageNow"></div></div>' +
       '<div class="card"><h3>D-group outreach</h3><div class="sub">Players who came in this period: have we reached out?</div><div class="funnel" id="outBars"></div></div></div>' +
-      '<div class="row even"><div class="card"><h3>Leaders &amp; who they care for</h3><div class="sub">Tap a leader to see their players</div><div class="table-wrap" id="facTable"></div></div>' +
+      '<div class="row even"><div class="card"><h3>Small group leads (sports)</h3><div class="sub">Who cares for each player during game play. Tap a name to see their players. D-group leaders are under D-groups.</div><div class="table-wrap" id="facTable"></div></div>' +
       '<div class="card"><h3>Life stage</h3><div class="sub">Players who came in this period</div><div class="table-wrap" id="lifeTable"></div><h3 style="margin-top:18px">Church connection</h3><div class="sub">What attendees said when they signed up</div><div class="table-wrap" id="churchTable"></div></div></div>' +
       '<div class="row even"><div class="card"><h3>D-groups</h3><div class="sub">Who has been forwarded where</div><div class="table-wrap" id="dgTable"></div></div>' +
-      '<div class="card"><h3>Said "I\'ll play" vs came</h3><div class="sub">Recent games</div><div class="table-wrap" id="rsvpTable"></div></div></div>' +
-      '<div class="card"><h3>By satellite</h3><div class="sub">This period, counted by where people actually played. Players can play at both.</div><div class="table-wrap" id="satTable"></div></div>');
+      '<div class="card"><h3>Said "I\'ll play" vs came</h3><div class="sub">The next game and recent games. Updates as players answer.</div><div class="table-wrap" id="rsvpTable"></div></div></div>' +
+      '<div class="card"><h3>By satellite</h3><div class="sub">This period, counted by where people checked in. A player who plays at both counts at each.</div><div class="table-wrap" id="satTable"></div></div>');
     $$("#periodSeg button").forEach(function (b) { b.onclick = function () { period = b.dataset.p; A.routes["/leader/dashboard"](); }; });
+    $("#pdfBtn").onclick = function () { dashboardPdf(this); };
+    var pf = $("#pFrom"), pt = $("#pTo"), pg = $("#pGame");
+    if (pf) pf.onchange = function () { pFrom = pf.value; paintDashboard(); };
+    if (pt) pt.onchange = function () { pTo = pt.value; paintDashboard(); };
+    if (pg) pg.onchange = function () { pGame = pg.value; paintDashboard(); };
     $$("#dashSat button").forEach(function (b) { b.onclick = function () { satFilter = b.dataset.sat; A.routes["/leader/dashboard"](); }; });
     paintDashboard();
     currentRefresh = paintDashboard;
@@ -435,7 +644,7 @@
     if (!$("#kpis")) return;
     var m = metrics();
     var need = m.active.filter(function (p) { return act(p, m.vbp.get(p.id) || [], m.rbp); }).length;
-    var lbl = { month: "This month", "3m": "In the last 3 months", year: "This year", all: "So far" }[period];
+    var lbl = periodLabel(m);
     $("#headline").innerHTML = !m.PL.length ? "No players yet" + (satFilter ? " in " + esc(satFilter) : "") + ". Check-ins and sign-ups will show up here." :
       (satFilter ? esc(satFilter) + " · " : "") + esc(lbl) + ": <b>" + m.firsts.length + "</b> new " + (m.firsts.length === 1 ? "player" : "players") + " came to the court and <b>" + pct(m.cameBack.length, m.firsts.length) + "%</b> of them have come back. <b>" + m.sent.length + "</b> forwarded to a D-group, <b>" + m.decisions.length + "</b> received Christ" + (m.baptisms.length ? ", and <b>" + m.baptisms.length + "</b> baptized" : "") + ". <b>" + need + "</b> need follow-up.";
     var k = [["Check-ins", m.cin.length, m.uniq.size + " different players"], ["First-timers", m.firsts.length, "first visit in this period"], ["Returning players", m.returning.size, "came back after a first visit"],
@@ -452,7 +661,7 @@
       var cols = ["--s2", "--s1", "--good", "--muted"];
       funnel($("#outBars"), L.OUTREACH.map(function (o, i) { return { label: o.label, v: m.active.filter(function (p) { return L.outreachOf(p) === o.k; }).length, color: cols[i] }; }), m.active.length);
     } else { $("#stageNow").innerHTML = $("#outBars").innerHTML = '<div class="empty">No check-ins in this period.</div>'; }
-    paintFacilitators(m); paintLife(m); paintDgTable(m); paintRsvp(m); paintSat();
+    paintFacilitators(m); paintLife(m); paintDgTable(m); paintRsvp(m); paintSat(); paintNextGames(); paintGameDay();
   }
 
   function funnel(el, rows, total) {
@@ -508,6 +717,19 @@
     return '<path d="M' + x + "," + (y + h) + " V" + (y + r) + " Q" + x + "," + y + " " + (x + r) + "," + y + " H" + (x + w - r) + " Q" + (x + w) + "," + y + " " + (x + w) + "," + (y + r) + " V" + (y + h) + ' Z" fill="' + fill + '"/>';
   }
   function volunteers() { return D.players.filter(function (p) { return p.volunteer && ((p.firstName || "") + (p.lastName || "")).trim(); }); }
+  /* Names offered for "D-group leader": anyone already leading a D-group, plus ministry leaders. Any other name can be typed. */
+  function dgLeaderOptions() {
+    var s = new Set((D.settings.leaders || []).filter(Boolean));
+    D.dgroups.forEach(function (g) { if (g.leader) s.add(g.leader); });
+    D.players.forEach(function (p) { if (p.dgroupLeader) s.add(p.dgroupLeader); });
+    return Array.from(s).sort(function (a, b) { return a.localeCompare(b); });
+  }
+  /* Names offered for "Small group lead (sports)": ministry leaders, existing leads and volunteers. */
+  function leadOptions() {
+    var s = new Set(leaderNames());
+    D.players.forEach(function (p) { if (p.volunteer) s.add(L.fullName(p)); });
+    return Array.from(s).sort(function (a, b) { return a.localeCompare(b); });
+  }
   function leaderNames() {
     var s = new Set((D.settings.leaders || []).filter(Boolean));
     volunteers().forEach(function (p) { s.add(L.fullName(p).trim()); });
@@ -533,9 +755,9 @@
         reached: ps.filter(function (p) { return L.outreachOf(p) !== "not_yet"; }).length, dg: ps.filter(function (p) { return L.outreachOf(p) === "attending"; }).length,
         saved: ps.filter(function (p) { return L.stageIdx(p.stage) >= L.stageIdx("received"); }).length, act: ps.filter(function (p) { return act(p, m.vbp.get(p.id) || [], m.rbp); }).length };
     }).sort(function (a, b) { return (a.n === "") - (b.n === "") || b.total - a.total; });
-    if (!D.players.length) { $("#facTable").innerHTML = '<div class="empty">Volunteers appear here once they sign up. Then open each attendee and pick the volunteer caring for them.</div>'; return; }
-    $("#facTable").innerHTML = '<table class="t"><thead><tr><th>Leader</th><th class="num">Players</th><th class="num">Came</th><th class="num">Regulars</th><th class="num">Reached out</th><th class="num">In D-group</th><th class="num">Received Christ</th><th class="num">Need action</th></tr></thead><tbody>' +
-      rows.map(function (r) { return '<tr class="click" data-f="' + esc(r.n || "__none") + '"><td><b>' + (r.n ? esc(r.n) : '<span style="color:var(--warn)">No leader yet</span>') + '</b></td><td class="num">' + r.total + '</td><td class="num">' + r.active + '</td><td class="num">' + r.regular + '</td><td class="num">' + r.reached + '</td><td class="num">' + r.dg + '</td><td class="num">' + r.saved + '</td><td class="num">' + (r.act ? '<b style="color:var(--warn)">' + r.act + "</b>" : "0") + "</td></tr>"; }).join("") + "</tbody></table>";
+    if (!D.players.length) { $("#facTable").innerHTML = '<div class="empty">Volunteers appear here once they sign up. Then open each attendee and pick their small group lead.</div>'; return; }
+    $("#facTable").innerHTML = '<table class="t"><thead><tr><th>Small group lead</th><th class="num">Players</th><th class="num">Came</th><th class="num">Regulars</th><th class="num">Reached out</th><th class="num">In D-group</th><th class="num">Received Christ</th><th class="num">Need action</th></tr></thead><tbody>' +
+      rows.map(function (r) { return '<tr class="click" data-f="' + esc(r.n || "__none") + '"><td><b>' + (r.n ? esc(r.n) : '<span style="color:var(--warn)">No small group lead yet</span>') + '</b></td><td class="num">' + r.total + '</td><td class="num">' + r.active + '</td><td class="num">' + r.regular + '</td><td class="num">' + r.reached + '</td><td class="num">' + r.dg + '</td><td class="num">' + r.saved + '</td><td class="num">' + (r.act ? '<b style="color:var(--warn)">' + r.act + "</b>" : "0") + "</td></tr>"; }).join("") + "</tbody></table>";
     $$("#facTable tr[data-f]").forEach(function (tr) { tr.onclick = function () { fuFilter.who = tr.dataset.f; fuFilter.action = false; A.go("#/leader/followup"); }; });
   }
   function paintSat() {
@@ -543,7 +765,7 @@
     var rows = L.SATELLITES.concat([""]).map(function (sat) {
       satFilter = sat === "" ? "__none" : sat;
       var m = metrics();
-      if (sat === "") { m.PL = D.players.filter(function (p) { return !p.satellite; }); }
+      if (sat === "") { m.PL = []; }
       var visitors = sat ? new Set(m.cin.filter(function (c) { var p = D.players.find(function (x) { return x.id === c.playerId; }); return p && p.satellite && p.satellite !== sat; }).map(function (c) { return c.playerId; })).size : 0;
       return { sat: sat, players: m.uniq.size, visitors: visitors, checkins: m.cin.length, firsts: m.firsts.length, back: m.cameBack.length, dg: m.sent.length, saved: m.decisions.length };
     });
@@ -555,16 +777,76 @@
       }).join("") + "</tbody></table>" + (unsure ? '<div class="sub" style="margin:10px 0 0">' + unsure + " player" + (unsure === 1 ? "" : "s") + " have no satellite set. Open them in Players to set it.</div>" : "");
     $$("#satTable tr[data-sat]").forEach(function (tr) { tr.onclick = function () { satFilter = tr.dataset.sat; A.routes["/leader/dashboard"](); }; });
   }
+  /* Game day report: the people who actually attended and checked in, by the satellite they checked in at. */
+  var gdDate = "";
+  function paintGameDay() {
+    var el = $("#gameDay"); if (!el) return;
+    var dates = Array.from(new Set(D.checkins.map(function (c) { return c.date; }))).sort().reverse();
+    if (!dates.length) { el.innerHTML = '<h3>Game day report</h3><div class="empty">No check-ins yet.</div>'; return; }
+    var d = period === "game" ? periodRange()[0] : (gdDate && dates.indexOf(gdDate) >= 0 ? gdDate : dates[0]);
+    var pm = playersMap(), sats = satFilter && satFilter !== "__none" ? [satFilter] : L.SATELLITES;
+    var tot = { pl: 0, first: 0, ret: 0, vol: 0, vis: 0, yes: 0, yesCame: 0, walkIn: 0 };
+    var rows = sats.map(function (sat) {
+      var ck = D.checkins.filter(function (c) { return c.date === d && satOfCheckin(c) === sat; });
+      var pl = ck.filter(function (c) { return c.role !== "volunteer"; }), ids = new Set(pl.map(function (c) { return c.playerId; }));
+      var vis = pl.filter(function (c) { var p = pm.get(c.playerId); return p && p.satellite && p.satellite !== sat; });
+      var yes = (D.rsvps || []).filter(function (r) { return r.date === d && r.going && rsvpSat(r) === sat; });
+      var yesIds = new Set(yes.map(function (r) { return r.playerId; }));
+      var r = { sat: sat, gym: (ck.find(function (c) { return c.venue; }) || {}).venue || L.venueFor(D.settings, sat, d).gym, pl: pl.length, first: pl.filter(function (c) { return c.firstTime; }).length, vol: ck.length - pl.length, vis: vis.length,
+        yes: yes.length, yesCame: yes.filter(function (x) { return ids.has(x.playerId); }).length, walkIn: pl.filter(function (c) { return !yesIds.has(c.playerId); }).length, list: ck };
+      r.ret = r.pl - r.first;
+      Object.keys(tot).forEach(function (k) { tot[k] += r[k]; });
+      return r;
+    });
+    var cell = function (r, bold) { var b = function (x) { return bold ? "<b>" + x + "</b>" : x; };
+      return '<td class="num">' + b(r.pl) + '</td><td class="num">' + r.first + '</td><td class="num">' + r.ret + '</td><td class="num">' + r.vis + '</td><td class="num">' + r.vol + '</td><td class="num">' + r.yesCame + " of " + r.yes + '</td><td class="num">' + r.walkIn + "</td>"; };
+    var who = rows.map(function (r) {
+      if (!r.list.length) return "";
+      return '<details><summary>' + esc(r.sat) + ": see who checked in (" + r.list.length + ")</summary><div class=\"choices\" style=\"margin-top:6px;gap:4px\">" + r.list.slice().sort(function (x, y) { return (x.ts || 0) - (y.ts || 0); }).map(function (c) {
+        var p = pm.get(c.playerId) || {}, note = c.role === "volunteer" ? " · volunteer" : c.firstTime ? " · first time" : p.satellite && p.satellite !== r.sat ? " · from " + p.satellite : "";
+        return '<span class="pill' + (c.firstTime && c.role !== "volunteer" ? " new" : "") + '">' + esc(L.fullName(p)) + esc(note) + "</span>";
+      }).join("") + "</div></details>";
+    }).join("");
+    el.innerHTML = '<div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap"><div><h3>Game day report</h3><div class="sub" style="margin:0">Who attended and checked in, counted at the satellite where they checked in.</div></div>' +
+      (period === "game" ? "" : '<label class="periodpick noprint" style="margin-left:auto">Game date <select class="input" id="gdPick">' + dates.slice(0, 60).map(function (x) { return '<option value="' + x + '"' + (x === d ? " selected" : "") + ">" + esc(A.fmt(x)) + "</option>"; }).join("") + "</select></label>") + "</div>" +
+      '<div class="table-wrap" style="margin-top:10px"><table class="t"><thead><tr><th>' + esc(A.fmt(d)) + '</th><th class="num">Checked in</th><th class="num">New</th><th class="num">Returning</th><th class="num">From other sat.</th><th class="num">Volunteers</th><th class="num" title="Said I\'ll play and came">Said yes, came</th><th class="num" title="Came without saying I\'ll play">Walk-ins</th></tr></thead><tbody>' +
+      rows.map(function (r) { return "<tr><td><b>" + esc(r.sat) + "</b>" + (r.gym ? '<div class="sub" style="margin:0">' + esc(r.gym) + "</div>" : "") + "</td>" + cell(r) + "</tr>"; }).join("") +
+      (rows.length > 1 ? "<tr><td><b>Total</b></td>" + cell(tot, true) + "</tr>" : "") + "</tbody></table></div>" + who;
+    var gp = $("#gdPick"); if (gp) gp.onchange = function () { gdDate = gp.value; paintGameDay(); };
+  }
+  /* Next game per satellite: how many said "I'll play", so leads know how many to expect. */
+  function paintNextGames() {
+    var el = $("#nextGames"); if (!el) return;
+    var t = L.today(), pm = playersMap(), vbp = L.visitsByPlayer(D.checkins), sats = satFilter && satFilter !== "__none" ? [satFilter] : L.SATELLITES;
+    el.innerHTML = '<h3>Next game: who\'s coming</h3><div class="sub">Counted from players tapping “I\'ll play” on their app. Updates by itself as they answer.</div><div class="ngrid">' + sats.map(function (sat) {
+      var ng = L.nextGame(D.settings, t, sat);
+      if (!ng) return '<div class="ngcell"><div class="kicker2">' + esc(sat) + '</div><div class="sub" style="margin:6px 0 0">No game scheduled. Set game days in Settings.</div></div>';
+      var v = L.venueFor(D.settings, sat, ng.date), ans = (D.rsvps || []).filter(function (r) { return r.date === ng.date && rsvpSat(r) === sat; });
+      var yes = ans.filter(function (r) { return r.going; }), no = ans.length - yes.length;
+      var per = parseInt(cfgFor(ng.date, sat).perGame, 10) || 10;
+      var newOnes = yes.filter(function (r) { return !(vbp.get(r.playerId) || []).some(function (d) { return d < ng.date; }); }).length;
+      var past = Array.from(new Set(D.checkins.filter(function (c) { return c.date < t && satOfCheckin(c) === sat; }).map(function (c) { return c.date; }))).sort().slice(-4);
+      var avg = past.length ? Math.round(past.reduce(function (n, d) { return n + new Set(D.checkins.filter(function (c) { return c.date === d && c.role !== "volunteer" && satOfCheckin(c) === sat; }).map(function (c) { return c.playerId; })).size; }, 0) / past.length) : 0;
+      var here = ng.date === t ? yes.filter(function (r) { return D.checkins.some(function (c) { return c.date === t && c.playerId === r.playerId; }); }).length : -1;
+      var names = yes.map(function (r) { var p = pm.get(r.playerId); return p ? '<span class="pill' + ((vbp.get(p.id) || []).some(function (d) { return d < ng.date; }) ? "" : " new") + '">' + esc(L.fullName(p)) + "</span>" : ""; }).join("");
+      return '<div class="ngcell"><div class="kicker2">' + esc(sat) + " · " + (ng.date === t ? "Today" : esc(A.fmt(ng.date))) + (v.time ? " · " + esc(L.fmtTime(v.time)) : "") + (v.gym ? " · " + esc(v.gym) : "") + "</div>" +
+        '<div style="display:flex;align-items:baseline;gap:8px;margin-top:6px"><span class="ngbig">' + yes.length + '</span><span style="font-weight:600">said they\'ll play</span></div>' +
+        '<div class="sub" style="margin:4px 0 0">' + (newOnes ? newOnes + " new · " : "") + no + " can\'t make it · about " + Math.max(1, Math.ceil(yes.length / per)) + (Math.ceil(yes.length / per) > 1 ? " games" : " game") + " of " + per + (avg ? " · usually " + avg + " come" : "") + (here >= 0 ? " · " + here + " of them here now" : "") + "</div>" +
+        (yes.length ? "<details><summary>See who</summary><div class=\"choices\">" + names + "</div></details>" : "") + "</div>";
+    }).join("") + "</div>";
+  }
   function paintRsvp(m) {
-    var t = L.today(), dates = new Set();
-    (D.rsvps || []).forEach(function (r) { if (r.date <= t) dates.add(r.date); });
+    var t = L.today(), dates = new Set(), ng = L.nextGame(D.settings, t, satFilter || ""), upto = ng ? ng.date : t;
+    if (ng) dates.add(ng.date);
+    (D.rsvps || []).forEach(function (r) { if (r.date <= upto && (!satFilter || rsvpSat(r) === satFilter)) dates.add(r.date); });
     var list = Array.from(dates).sort().reverse().slice(0, 8);
     if (!list.length) { $("#rsvpTable").innerHTML = '<div class="empty">No "I\'ll play" answers yet. Players see the button on their app for the next game.</div>'; return; }
     $("#rsvpTable").innerHTML = '<table class="t"><thead><tr><th>Game</th><th class="num">Said yes</th><th class="num">Came</th><th class="num">Didn\'t come</th><th class="num">All players</th></tr></thead><tbody>' +
       list.map(function (d) {
         var here = new Set(D.checkins.filter(function (c) { return c.date === d && c.role !== "volunteer" && m.inSat(c); }).map(function (c) { return c.playerId; }));
-        var yes = D.rsvps.filter(function (r) { return r.date === d && r.going && (!satFilter || r.satellite === satFilter); }), came = yes.filter(function (r) { return here.has(r.playerId); }).length;
-        return "<tr><td>" + esc(A.fmt(d)) + (d === t ? ' <span class="pill new">Today</span>' : "") + '</td><td class="num">' + yes.length + '</td><td class="num">' + came + '</td><td class="num">' + (d === t ? "—" : yes.length - came) + '</td><td class="num">' + here.size + "</td></tr>";
+        var yes = (D.rsvps || []).filter(function (r) { return r.date === d && r.going && (!satFilter || rsvpSat(r) === satFilter); }), came = yes.filter(function (r) { return here.has(r.playerId); }).length;
+        var fut = d > t;
+        return "<tr><td>" + esc(A.fmt(d)) + (d === t ? ' <span class="pill new">Today</span>' : fut ? ' <span class="pill">Next game</span>' : "") + '</td><td class="num"><b>' + yes.length + '</b></td><td class="num">' + (fut ? "—" : came) + '</td><td class="num">' + (d >= t ? "—" : yes.length - came) + '</td><td class="num">' + (fut ? "—" : here.size) + "</td></tr>";
       }).join("") + "</tbody></table>";
   }
   function paintChurch(m) {
@@ -592,7 +874,7 @@
     $("#dgTable").innerHTML = '<table class="t"><thead><tr><th>D-group</th><th>Leader</th><th class="num">Members</th><th class="num">New this period</th><th class="num">Received Christ</th></tr></thead><tbody>' +
       D.dgroups.map(function (g) {
         var mem = m.PL.filter(function (p) { return p.dgroupId === g.id; });
-        return '<tr class="click" data-g="' + esc(g.id) + '"><td><b>' + esc(g.name) + '</b><div class="sub" style="margin:0">' + esc(g.meets || "") + "</div></td><td>" + esc(g.leader || "—") + '</td><td class="num">' + mem.length + '</td><td class="num">' + mem.filter(function (p) { return inRange(p.dgroupDate, m.a, m.b); }).length + '</td><td class="num">' + mem.filter(function (p) { return L.stageIdx(p.stage) >= L.stageIdx("received"); }).length + "</td></tr>";
+        return '<tr class="click" data-g="' + esc(g.id) + '"><td><b>' + esc(g.name) + '</b><div class="sub" style="margin:0">' + esc(g.meets || "") + "</div></td><td>" + esc(g.leader || "—") + (function () { var o = Array.from(new Set(mem.map(function (p) { return p.dgroupLeader; }).filter(Boolean))); return o.length ? '<div class="sub" style="margin:0">also ' + esc(o.join(", ")) + "</div>" : ""; })() + '</td><td class="num">' + mem.length + '</td><td class="num">' + mem.filter(function (p) { return inRange(p.dgroupDate, m.a, m.b); }).length + '</td><td class="num">' + mem.filter(function (p) { return L.stageIdx(p.stage) >= L.stageIdx("received"); }).length + "</td></tr>";
       }).join("") + "</tbody></table>";
     $$("#dgTable tr[data-g]").forEach(function (tr) { tr.onclick = function () { plFilter.group = tr.dataset.g; A.go("#/leader/players"); }; });
   }
@@ -637,16 +919,16 @@
       .sort(function (a, b) { return (b.act ? 1 : 0) - (a.act ? 1 : 0) || (b.v[b.v.length - 1] || "").localeCompare(a.v[a.v.length - 1] || ""); });
     var body = $("#fuBody");
     if (!rows.length) {
-      body.innerHTML = '<div class="empty">' + (fuFilter.who === "__mine" ? "No players assigned to you" + (fuFilter.action ? " need action right now." : " yet. Open a player and set you as their leader.") : "Nothing here right now.") + "</div>";
+      body.innerHTML = '<div class="empty">' + (fuFilter.who === "__mine" ? "No players assigned to you" + (fuFilter.action ? " need action right now." : " yet. Open a player and set yourself as their small group lead.") : "Nothing here right now.") + "</div>";
       return;
     }
     var attPill = function (k) { return '<span class="pill" title="' + esc(L.ATT[k].hint) + '"><span class="dot" style="background:' + L.ATT[k].color + '"></span>' + esc(L.ATT[k].label) + "</span>"; };
     var outPill = function (k) { return '<span class="pill ' + (k === "attending" ? "good" : k === "not_yet" ? "new" : "") + '">' + esc(L.outreachLabel(k)) + "</span>"; };
     var wide = window.matchMedia("(min-width: 900px)").matches;
     if (wide) {
-      body.innerHTML = '<div class="card" style="padding:8px 12px"><div class="table-wrap"><table class="t"><thead><tr><th>Player</th><th>Attendance</th><th class="num">Visits</th><th>Last seen</th><th>D-group outreach</th><th>D-group</th><th>Leader</th><th>Faith step</th><th>Next step</th></tr></thead><tbody>' +
+      body.innerHTML = '<div class="card" style="padding:8px 12px"><div class="table-wrap"><table class="t"><thead><tr><th>Player</th><th>Attendance</th><th class="num">Visits</th><th>Last seen</th><th>D-group outreach</th><th>D-group</th><th>Small group lead</th><th>Faith step</th><th>Next step</th></tr></thead><tbody>' +
         rows.map(function (r) {
-          return '<tr class="click" data-id="' + esc(r.p.id) + '"><td><b>' + esc(L.fullName(r.p)) + '</b><div class="sub" style="margin:0">' + esc(r.p.lifeStage || "") + "</div></td><td>" + attPill(r.att) + '</td><td class="num">' + r.v.length + "</td><td>" + A.fmt(r.v[r.v.length - 1]) + "</td><td>" + outPill(r.out) + "</td><td>" + esc(dgName(r.p.dgroupId) || "—") + "</td><td>" + (r.f ? esc(r.f) : '<span style="color:var(--warn);font-weight:600">Unassigned</span>') + '</td><td><span class="pill">' + esc(L.stageLabel(r.p.stage)) + '</span></td><td style="font-weight:600">' + (r.act ? "⚑ " + esc(r.act) : '<span style="color:var(--muted);font-weight:400">On track</span>') + "</td></tr>";
+          return '<tr class="click" data-id="' + esc(r.p.id) + '"><td><b>' + esc(L.fullName(r.p)) + '</b><div class="sub" style="margin:0">' + esc(r.p.lifeStage || "") + "</div></td><td>" + attPill(r.att) + '</td><td class="num">' + r.v.length + "</td><td>" + A.fmt(r.v[r.v.length - 1]) + "</td><td>" + outPill(r.out) + "</td><td>" + dgCell(r.p) + "</td><td>" + (r.f ? esc(r.f) : '<span style="color:var(--warn);font-weight:600">Unassigned</span>') + '</td><td><span class="pill">' + esc(L.stageLabel(r.p.stage)) + '</span></td><td style="font-weight:600">' + (r.act ? "⚑ " + esc(r.act) : '<span style="color:var(--muted);font-weight:400">On track</span>') + "</td></tr>";
         }).join("") + '</tbody></table></div><div class="sub" style="margin:10px 0 0">' + rows.length + " players</div></div>";
     } else {
       body.innerHTML = '<div class="stackv" style="gap:10px">' + rows.map(function (r) {
@@ -654,6 +936,41 @@
       }).join("") + "</div>";
     }
     $$("[data-id]", body).forEach(function (el) { el.onclick = function () { openPlayer(el.dataset.id); }; });
+  }
+
+  /* ---------------- my players (small group lead, incl. volunteers) ---------------- */
+  A.routes["/leader/mine"] = function () {
+    if (needAuth()) return;
+    lshell("mine", '<div style="max-width:760px;margin:0 auto"><div class="dash-head"><div><div class="kicker2">Small group lead (sports)</div><h2>My players</h2></div></div>' +
+      '<p class="sub" style="font-size:14px">Players a leader assigned to you. Tap Open to see and update their details, faith step, D-group and notes. Check on them during the week and look out for them on game day.</p><div id="mineBody"></div></div>');
+    paintMine(); currentRefresh = paintMine;
+  };
+  function paintMine() {
+    var box = $("#mineBody"); if (!box) return;
+    var me = ((auth() || {}).name || "").trim().toLowerCase(), t = L.today(), vbp = L.visitsByPlayer(D.checkins), rm = rbp();
+    var mine = D.players.filter(function (p) { return isMyPlayer(p, me, t); })
+      .map(function (p) { var v = vbp.get(p.id) || []; return { p: p, v: v, last: v[v.length - 1] || "" }; })
+      .sort(function (a, b) { return b.last.localeCompare(a.last); });
+    if (!mine.length) { box.innerHTML = '<div class="empty">No players assigned to you yet. A leader assigns them from a player\'s record (Small group lead).</div>'; return; }
+    box.innerHTML = '<div class="sub" style="margin:0 0 8px">' + mine.length + (mine.length === 1 ? " player" : " players") + '</div><div class="stackv" style="gap:10px">' + mine.map(function (r) {
+      var p = r.p, att = L.attendanceOf(r.v, t), here = r.v.indexOf(t) >= 0, ng = L.nextGame(D.settings, t, p.satellite || "");
+      var ans = ng && (rm.get(p.id) || []).find(function (x) { return x.date === ng.date; });
+      var ph = String(p.phone || "").replace(/\D/g, "");
+      var rsvp = ng ? (ans ? (ans.going ? "Said they'll play " : "Can't make it ") : "No answer yet for ") + A.fmt(ng.date) : "";
+      return '<div class="fu-card"><div style="flex:1;min-width:0"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><b>' + esc(L.fullName(p)) + '</b>' + (function () { var c = coverMap(t)[p.id]; if (!c) return ""; return nameIs(c, me) ? '<span class="pill warn">Covering for ' + esc(p.facilitator || "a lead") + " today</span>" : '<span class="pill">' + esc(c) + " covers today</span>"; })() + '<span class="pill"><span class="dot" style="background:' + L.ATT[att].color + '"></span>' + esc(L.ATT[att].label) + "</span>" + (here ? '<span class="pill good">Here today</span>' : "") + "</div>" +
+        '<div class="sub" style="margin:2px 0 0">' + r.v.length + (r.v.length === 1 ? " visit" : " visits") + (r.last ? " · last " + A.fmt(r.last) : "") + (p.satellite ? " · " + esc(p.satellite) : "") + (rsvp ? " · " + esc(rsvp) : "") + "</div>" +
+        (here ? '<div class="why" style="color:var(--text)">' + esc(spotText(p.id)) + "</div>" : "") +
+        (!p.followedUp && r.v.length ? '<div style="margin-top:6px"><button class="btn small soft" data-fu="' + esc(p.id) + '">Mark as followed up</button></div>' : "") + "</div>" +
+        '<div style="display:flex;flex-direction:column;gap:6px"><button class="btn small primary" data-mine="' + esc(p.id) + '">Open</button>' + (ph && p.contactOk !== false ? '<a class="btn small" href="https://wa.me/' + ph + '" target="_blank" rel="noopener">WhatsApp</a><a class="btn small ghost" href="tel:+' + ph + '">Call</a>' : '<span class="sub" style="margin:0">Not OK to contact</span>') + "</div></div>";
+    }).join("") + "</div>";
+    $$("[data-fu]", box).forEach(function (b) { b.onclick = function () { queue({ type: "player", id: b.dataset.fu, patch: { followedUp: true, followedUpDate: t } }); A.toast("Marked as followed up"); paintMine(); }; });
+    $$("[data-mine]", box).forEach(function (b) { b.onclick = function () { openMine(b.dataset.mine); }; });
+  }
+  /* A small group lead (or whoever covers today) can update their players. */
+  function openMine(id) {
+    var p = playersMap().get(id), me = ((auth() || {}).name || "").trim().toLowerCase();
+    if (!p || !isMyPlayer(p, me, L.today())) return A.toast("This player isn't assigned to you");
+    openPlayer(id, true);
   }
 
   /* ---------------- players ---------------- */
@@ -707,10 +1024,10 @@
     var k = plSort.key, val = function (r) { return k === "name" ? L.fullName(r.p).toLowerCase() : k === "visits" ? r.v.length : k === "stage" ? L.stageIdx(r.p.stage) : r.last; };
     rows.sort(function (a, b) { var x = val(a), y = val(b); return (x > y ? 1 : x < y ? -1 : 0) * plSort.dir; });
     var th = function (key, label, cls) { return '<th class="' + (cls || "") + '"><button data-k="' + key + '">' + label + (k === key ? (plSort.dir > 0 ? " ▲" : " ▼") : "") + "</button></th>"; };
-    $("#pt").innerHTML = "<thead><tr>" + th("name", "Name") + "<th>Code</th><th>Mobile</th><th>Life stage</th>" + th("visits", "Visits", "num") + "<th>Attendance</th>" + th("last", "Last seen") + th("stage", "Faith step") + "<th>D-group</th><th>Leader</th></tr></thead><tbody>" +
+    $("#pt").innerHTML = "<thead><tr>" + th("name", "Name") + "<th>Code</th><th>Mobile</th><th>Life stage</th>" + th("visits", "Visits", "num") + "<th>Attendance</th>" + th("last", "Last seen") + th("stage", "Faith step") + "<th>D-group</th><th>Small group lead</th></tr></thead><tbody>" +
       (rows.map(function (r) {
         var p = r.p;
-        return '<tr class="click" data-id="' + esc(p.id) + '"><td><b>' + esc(L.fullName(p)) + '</b><div class="sub" style="margin:0">' + esc(p.location || "") + "</div></td><td style=\"white-space:nowrap\">" + esc(L.codeLabel(p)) + "</td><td style=\"white-space:nowrap\">" + esc(p.phone) + '</td><td style="font-size:13px">' + esc(p.lifeStage || "—") + '<div class="sub" style="margin:0">' + esc(p.volunteer ? "Volunteer" : (p.churchStatus || "")) + (p.satellite ? " · " + esc(p.satellite) : "") + (playsBoth(p) ? " · plays both" : "") + '</div></td><td class="num">' + r.v.length + '</td><td><span class="pill"><span class="dot" style="background:' + L.ATT[r.att].color + '"></span>' + esc(L.ATT[r.att].label) + "</span></td><td>" + A.fmt(r.last) + '</td><td><span class="pill">' + esc(L.stageLabel(p.stage)) + "</span></td><td>" + esc(dgName(p.dgroupId) || "—") + '</td><td style="font-size:13px">' + (p.volunteer ? '<span class="pill">Volunteer</span>' : esc(fac(p) || "—")) + "</td></tr>";
+        return '<tr class="click" data-id="' + esc(p.id) + '"><td><b>' + esc(L.fullName(p)) + '</b><div class="sub" style="margin:0">' + esc(p.location || "") + "</div></td><td style=\"white-space:nowrap\">" + esc(L.codeLabel(p)) + "</td><td style=\"white-space:nowrap\">" + esc(p.phone) + '</td><td style="font-size:13px">' + esc(p.lifeStage || "—") + '<div class="sub" style="margin:0">' + esc(p.volunteer ? "Volunteer" : (p.churchStatus || "")) + (p.satellite ? " · " + esc(p.satellite) : "") + (playsBoth(p) ? " · plays both" : "") + '</div></td><td class="num">' + r.v.length + '</td><td><span class="pill"><span class="dot" style="background:' + L.ATT[r.att].color + '"></span>' + esc(L.ATT[r.att].label) + "</span></td><td>" + A.fmt(r.last) + '</td><td><span class="pill">' + esc(L.stageLabel(p.stage)) + "</span></td><td>" + dgCell(p) + '</td><td style="font-size:13px">' + (p.volunteer ? '<span class="pill">Volunteer</span>' : esc(fac(p) || "—")) + "</td></tr>";
       }).join("") || '<tr><td colspan="10"><div class="empty">' + (D.players.length ? "No players match these filters." : "No players yet. They appear here as they sign up.") + "</div></td></tr>") + "</tbody>";
     $$("#pt th button").forEach(function (b) { b.onclick = function () { var key = b.dataset.k; plSort = { key: key, dir: plSort.key === key ? -plSort.dir : (key === "name" ? 1 : -1) }; paintPlayers(); }; });
     $$("#pt tr[data-id]").forEach(function (tr) { tr.onclick = function () { openPlayer(tr.dataset.id); }; });
@@ -733,7 +1050,7 @@
     var miss = L.noShows(mine, visits);
     return '<p class="sub" style="margin:0 0 8px">Said “I\'ll play” ' + yes.length + " time" + (yes.length === 1 ? "" : "s") + (miss.length ? " · didn't come " + miss.length + " (" + miss.slice(-3).map(A.fmt).join(", ") + ")" : " · came every time") + "</p>";
   }
-  function openPlayer(id) {
+  function openPlayer(id, lim) {
     var isNew = !id, t = L.today();
     var p0 = isNew ? { firstName: "", lastName: "", phone: "", email: "", location: "", lifeStage: "", invitedBy: "", wantsConnect: "", contactOk: true, firstVisit: "", stage: "new", stageDates: { "new": t }, dgroupId: "", dgroupDate: "", followedUp: false, notes: "" } : playersMap().get(id);
     if (!p0) return;
@@ -748,13 +1065,15 @@
       '<div style="display:flex;gap:10px;align-items:center;font-size:13px;color:var(--text-2);flex-wrap:wrap"><span id="mStageInfo"></span><label style="margin-left:auto">Date of this step <input type="date" class="input" id="mStageDate" style="width:auto;min-height:36px;padding:4px 8px;display:inline-block"></label></div>' +
       '<div class="section-t">Care &amp; D-group</div>' +
       (isNew ? "" : '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;font-size:13px;color:var(--text-2)">Attendance (automatic): <span class="pill"><span class="dot" style="background:' + L.ATT[att].color + '"></span>' + esc(L.ATT[att].label) + "</span>" + esc(L.ATT[att].hint) + "</div>") +
-      '<div class="grid2 stack"><div id="mFacWrap"><label class="f" for="mFac">Volunteer / leader caring for them</label><input class="input" id="mFac" list="mFacList" value="' + esc(p.facilitator || "") + '" placeholder="' + esc(L.facilitatorOf(Object.assign({}, p, { facilitator: "" }), D.dgroups) || "Type or pick a name") + '"><datalist id="mFacList">' + facOptions(p.satellite) + "</datalist>" +
-      '<button type="button" class="btn small ghost" id="mMe" style="margin-top:4px">Assign to me</button></div>' +
+      '<div class="grid2 stack"><div id="mFacWrap"><label class="f" for="mFac">Small group lead (sports)</label><input class="input" id="mFac" list="mFacList" value="' + esc(p.facilitator || "") + '" placeholder="Type or pick a leader or volunteer"' + (lim ? " readonly" : "") + '><datalist id="mFacList">' + facOptions(p.satellite) + "</datalist>" +
+      (lim ? '<div class="sub" style="margin:4px 0 0">' + (coverMap(t)[id] ? "Covered today by " + esc(coverMap(t)[id]) + ". " : "") + "Leaders change who leads them.</div></div>" : '<button type="button" class="btn small ghost" id="mMe" style="margin-top:4px">Assign to me</button></div>') +
       '<div id="mVolNote" class="sub" style="margin:0;align-self:center"></div>' +
       '<div><label class="f" for="mOut">D-group outreach</label><div style="display:flex;gap:6px"><select class="input" id="mOut">' + L.OUTREACH.map(function (o) { return '<option value="' + o.k + '"' + (L.outreachOf(p) === o.k ? " selected" : "") + ">" + esc(o.label) + "</option>"; }).join("") + '</select><input type="date" class="input" id="mOutDate" style="width:150px" aria-label="Date reached out" value="' + esc(p.dgOutreachDate || "") + '"></div></div>' +
-      '<div><label class="f" for="mDg">D-group</label><select class="input" id="mDg"><option value="">Not yet</option>' + D.dgroups.map(function (g) { return '<option value="' + esc(g.id) + '"' + (g.id === p.dgroupId ? " selected" : "") + ">" + esc(g.name) + (g.leader ? " — " + esc(g.leader) : "") + "</option>"; }).join("") + "</select></div>" +
-      '<div><label class="f" for="mDgDate">Date forwarded</label><input type="date" class="input" id="mDgDate" value="' + esc(p.dgroupDate || "") + '"></div></div>' +
-      '<div style="display:flex;gap:18px;margin-top:10px;flex-wrap:wrap"><label class="toggle"><input type="checkbox" id="mFu"' + (p.followedUp ? " checked" : "") + '> Followed up after first visit</label><label class="toggle"><input type="checkbox" id="mOk"' + (p.contactOk ? " checked" : "") + '> OK to contact</label><label class="toggle"><input type="checkbox" id="mVol"' + (p.volunteer ? " checked" : "") + "> Volunteer (serves; not on the follow-up list)</label></div>" +
+      '<div><label class="f" for="mDg">D-group</label><select class="input" id="mDg"><option value="">Not yet</option>' + D.dgroups.map(function (g) { return '<option value="' + esc(g.id) + '"' + (g.id === p.dgroupId ? " selected" : "") + ">" + esc(g.name) + (g.leader ? " — " + esc(g.leader) : "") + "</option>"; }).join("") + '<option value="__new">+ New D-group…</option></select><input class="input hidden" id="mDgNew" placeholder="New D-group name" style="margin-top:6px"></div>' +
+      '<div><label class="f" for="mDgDate">Forwarded to D-group on</label><input type="date" class="input" id="mDgDate" value="' + esc(p.dgroupDate || "") + '"></div>' +
+      '<div><label class="f" for="mDgLead">D-group leader</label><input class="input" id="mDgLead" list="mDgLeadList" value="' + esc(p.dgroupId ? L.dgroupLeaderOf(p, D.dgroups) : "") + '" placeholder="Any name, e.g. Pastor Jon"' + (p.dgroupId ? "" : " disabled") + '><datalist id="mDgLeadList">' + dgLeaderOptions().map(function (n) { return '<option value="' + esc(n) + '">'; }).join("") + "</datalist></div></div>" +
+      '<div class="sub" style="margin:6px 0 0">The small group lead looks after them at game play. The <b>D-group leader</b> is who leads their D-group once they commit. It can be anyone, not only a volunteer.</div>' +
+      '<div style="display:flex;gap:18px;margin-top:10px;flex-wrap:wrap"><label class="toggle"><input type="checkbox" id="mFu"' + (p.followedUp ? " checked" : "") + '> Followed up after first visit</label><label class="toggle"><input type="checkbox" id="mOk"' + (p.contactOk ? " checked" : "") + '> OK to contact</label><label class="toggle' + (lim ? " hidden" : "") + '"><input type="checkbox" id="mVol"' + (p.volunteer ? " checked" : "") + "> Volunteer (serves; not on the follow-up list)</label></div>" +
       '<div class="section-t">Notes</div><textarea class="input" id="mNotes" rows="3" placeholder="Conversations, prayer requests, next steps">' + esc(p.notes || "") + "</textarea>" +
       '<div class="section-t">Details</div><div class="grid2 stack">' +
       '<div><label class="f" for="mFirst">First name</label><input class="input" id="mFirst" value="' + esc(p.firstName) + '"></div><div><label class="f" for="mLast">Last name</label><input class="input" id="mLast" value="' + esc(p.lastName) + '"></div>' +
@@ -764,8 +1083,8 @@
       '<div><label class="f" for="mChurch">Church connection</label><select class="input" id="mChurch">' + opt(L.CHURCH, p.churchStatus) + "</select></div>" +
       '<div><label class="f" for="mInv">Invited by</label><input class="input" id="mInv" value="' + esc(p.invitedBy || "") + '"></div><div><label class="f" for="mWant">Interested in a D-group?</label><select class="input" id="mWant">' + opt(L.WANTS, p.wantsConnect) + "</select></div></div>" +
       (isNew ? "" : '<div class="section-t">Check-in QR</div><div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap"><div class="qrcard" style="padding:12px"><div class="qr" id="mQr" style="width:150px;height:150px"></div><div class="code" style="font-size:22px">' + esc(L.codeLabel(p)) + '</div></div><div class="sub" style="max-width:300px;margin:0">Show this to the player to photograph, or copy a message to send them.<div style="margin-top:8px"><button class="btn small" id="mCopy">Copy message</button></div></div></div>' +
-        '<div class="section-t">Visits</div>' + playedLine(p) + rsvpLine(p.id, visits) + '<div class="visits">' + (D.checkins.filter(function (c) { return c.playerId === id; }).sort(function (a, b) { return b.date.localeCompare(a.date); }).map(function (c) { return "<span>" + A.fmt(c.date) + (c.satellite ? " · " + esc(c.satellite) : "") + "</span>"; }).join("") || "<span>None yet</span>") + '</div><div style="margin-top:10px"><button class="btn small" id="mToday">' + (visits.indexOf(t) >= 0 ? "✓ Checked in today" : "Check in for today") + "</button></div>") +
-      '<div class="mfoot">' + (isNew ? "" : '<button class="btn small ghost danger" id="mDel">Delete player</button>') + '<span class="sp"></span><button class="btn" data-close>Cancel</button><button class="btn primary" id="mSave">' + (isNew ? "Add player" : "Save") + "</button></div>", { noFocus: true });
+        '<div class="section-t">Visits</div>' + playedLine(p) + rsvpLine(p.id, visits) + '<div class="visits">' + (D.checkins.filter(function (c) { return c.playerId === id; }).sort(function (a, b) { return b.date.localeCompare(a.date); }).map(function (c) { return "<span>" + A.fmt(c.date) + (c.satellite ? " · " + esc(c.satellite) + (c.venue ? " (" + esc(c.venue) + ")" : "") : "") + (c.role === "volunteer" ? " · served" : "") + "</span>"; }).join("") || "<span>None yet</span>") + '</div><div style="margin-top:10px"><div id="mTodayBox"></div></div>') +
+      '<div class="mfoot">' + (isNew || lim ? "" : '<button class="btn small ghost danger" id="mDel">Delete player</button>') + '<span class="sp"></span><button class="btn" data-close>Cancel</button><button class="btn primary" id="mSave">' + (isNew ? "Add player" : "Save") + "</button></div>", { noFocus: true });
 
     var stage = p.stage || "new";
     var drawStep = function () {
@@ -777,9 +1096,15 @@
     };
     $$("#mStep button").forEach(function (b) { b.onclick = function () { stage = b.dataset.k; L.STAGES.forEach(function (s, i) { if (i > L.stageIdx(stage)) delete p.stageDates[s.k]; }); if (!p.stageDates[stage]) p.stageDates[stage] = t; drawStep(); }; });
     $("#mStageDate").onchange = function () { if (this.value) { p.stageDates[stage] = this.value; drawStep(); } };
+    var groupLeader = function (gid) { var g = D.dgroups.find(function (x) { return x.id === gid; }); return g ? g.leader || "" : ""; };
+    $("#mDg").addEventListener("change", function () {
+      var v = this.value, lead = $("#mDgLead");
+      $("#mDgNew").classList.toggle("hidden", v !== "__new"); if (v === "__new") $("#mDgNew").focus();
+      lead.disabled = !v; if (!v) lead.value = ""; else if (v !== "__new") lead.value = groupLeader(v) || lead.value;
+    });
     $("#mDg").onchange = function () { if (this.value) { if (!$("#mDgDate").value) $("#mDgDate").value = t; $("#mOut").value = "attending"; if (!$("#mOutDate").value) $("#mOutDate").value = t; } else { $("#mDgDate").value = ""; if ($("#mOut").value === "attending") $("#mOut").value = "invited"; } };
     $("#mOut").onchange = function () { if (this.value !== "not_yet" && !$("#mOutDate").value) $("#mOutDate").value = t; if (this.value === "not_yet") $("#mOutDate").value = ""; };
-    $("#mMe").onclick = function () { $("#mFac").value = (auth() || {}).name || ""; };
+    if ($("#mMe")) $("#mMe").onclick = function () { $("#mFac").value = (auth() || {}).name || ""; };
     var volNote = function () {
       var vol = $("#mVol").checked, nm = (($("#mFirst").value || "") + " " + ($("#mLast").value || "")).trim().toLowerCase();
       $("#mFacWrap").style.display = vol ? "none" : "";
@@ -795,8 +1120,20 @@
         var msg = "Hi " + p.firstName + "! Thanks for playing with " + (D.settings.name || "CCF Sports Ministry") + ". Your check-in code is " + L.codeLabel(p) + ". Open " + location.origin + ", tap “I've been here before” and enter " + p.code + " with the last 4 digits of your mobile to get your QR on your phone. See you on the court!";
         (navigator.clipboard ? navigator.clipboard.writeText(msg) : Promise.reject()).then(function () { A.toast("Message copied"); }, function () { A.toast("Couldn't copy. The code is " + L.codeLabel(p)); });
       };
-      $("#mToday").onclick = function () { if (visits.indexOf(t) >= 0) return; queue({ type: "checkin", rec: { playerId: id, date: t, ts: Date.now() } }); this.textContent = "✓ Checked in today"; A.toast("Checked in"); };
-      $("#mDel").onclick = function () {
+      var drawToday = function () {
+        var box = $("#mTodayBox"); if (!box) return;
+        var ck = D.checkins.find(function (c) { return c.playerId === id && c.date === t; }), at = ck ? satOfCheckin(ck) : "";
+        box.innerHTML = '<div class="lastsat" style="margin:0">' + (ck ? "✓ Checked in today at <b style=\"color:var(--text)\">" + esc(at || "no satellite") + "</b>" + L.SATELLITES.filter(function (k) { return k !== at; }).map(function (k) { return '<button class="btn small" data-tsat="' + k + '">Change to ' + esc(k) + "</button>"; }).join("")
+          : "Check in for today at" + L.SATELLITES.map(function (k) { return '<button class="btn small' + (k === (curSat || p0.satellite) ? " primary" : "") + '" data-tsat="' + k + '">' + esc(k) + "</button>"; }).join("")) + "</div>";
+        $$("[data-tsat]", box).forEach(function (b) { b.onclick = function () {
+          var k = b.dataset.tsat, venue = L.venueFor(D.settings, k, t).gym;
+          if (ck) queue({ type: "checkinPatch", id: ck.id, patch: { satellite: k, venue: venue } });
+          else queue({ type: "checkin", rec: { playerId: id, date: t, ts: Date.now(), role: p0.volunteer ? "volunteer" : "player", satellite: k, venue: venue } });
+          A.toast((ck ? "Now counts at " : "Checked in at ") + k); drawToday();
+        }; });
+      };
+      if (!lim) drawToday(); else { var tb = $("#mTodayBox"); if (tb) tb.innerHTML = ""; }
+      if ($("#mDel")) $("#mDel").onclick = function () {
         var del = this;
         del.outerHTML = '<span style="font-size:13px">Delete ' + esc(p.firstName) + ' and all their visits? <button class="btn small danger" id="mDelYes">Yes, delete</button></span>';
         $("#mDelYes").onclick = function () { queue({ type: "deletePlayer", id: id }); A.closeModal(); A.toast("Player deleted"); refreshView(); };
@@ -812,7 +1149,17 @@
         stage: stage, stageDates: p.stageDates, dgroupId: $("#mDg").value, dgroupDate: $("#mDg").value ? ($("#mDgDate").value || t) : "", notes: $("#mNotes").value
       };
       if (upd.followedUp && !p0.followedUp) upd.followedUpDate = t;
+      if (lim) { upd.volunteer = !!p0.volunteer; upd.facilitator = p0.facilitator || ""; }
       if (!upd.firstName) { A.toast("First name is required"); return; }
+      var dgLead = $("#mDgLead").value.trim();
+      if (upd.dgroupId === "__new") {
+        var gname = $("#mDgNew").value.trim();
+        if (!gname) { A.toast("Type the new D-group's name"); return; }
+        var gid = rid(); queue({ type: "dgroup", id: gid, data: { name: gname, leader: dgLead, meets: "" } }); upd.dgroupId = gid;
+      }
+      // keep the player's own D-group leader only when it differs from the group's usual leader
+      upd.dgroupLeader = upd.dgroupId && dgLead && dgLead !== groupLeader(upd.dgroupId) ? dgLead : "";
+      if (upd.dgroupId && dgLead && !groupLeader(upd.dgroupId)) { var gg = D.dgroups.find(function (x) { return x.id === upd.dgroupId; }); if (gg) queue({ type: "dgroup", id: gg.id, data: { name: gg.name, leader: dgLead, meets: gg.meets || "" } }); upd.dgroupLeader = ""; }
       if (isNew) { upd.code = newCode(); upd.createdAt = Date.now(); upd.firstVisit = ""; upd.source = "leader"; }
       queue({ type: "player", id: isNew ? rid() : id, patch: upd });
       A.closeModal(); A.toast(isNew ? "Player added" : "Saved"); refreshView();
@@ -829,28 +1176,22 @@
       '<label class="f" for="sName">Ministry name</label><input class="input" id="sName" value="' + esc(D.settings.name || "CCF Sports Ministry") + '">' +
       '<label class="f" for="sTag" style="margin-top:12px">Welcome line</label><input class="input" id="sTag" value="' + esc(D.settings.tagline || "Play with a purpose.") + '">' +
       '<label class="f" for="sLeaders" style="margin-top:12px">Leaders who can sign in (one full name per line, e.g. John Sola). Only these names can sign in with the leader password, and each one sees their own people under Follow-up. Include your own name.</label><textarea class="input" id="sLeaders" rows="5">' + esc((D.settings.leaders || []).join("\n")) + "</textarea>" +
-      '<div class="section-t" style="margin-top:16px">Game schedule</div><div class="sub">Players see "I\'ll play" for the next game day.</div><div id="sched"></div>' +
+
       '<div style="margin-top:12px"><button class="btn primary" id="sSave">Save</button></div></div>' +
       '<div class="card"><h3>D-groups</h3><div class="sub">The discipleship groups players can join</div><div id="dgEdit"></div><button class="btn small" id="dgAdd">+ Add D-group</button></div></div>' +
-      '<div class="card" style="margin-bottom:16px"><h3>Satellites &amp; gyms</h3><div class="sub">Each satellite\'s usual gym. Players see it with a Directions button. When a gym changes for one Sunday, add it below.</div><div id="satEdit"></div>' +
-      '<div class="section-t">Gym change for one date</div><div class="vcadd"><input type="date" class="input" id="vcDate" aria-label="Date"><select class="input" id="vcSat" aria-label="Satellite">' + L.SATELLITES.map(function (x) { return "<option>" + x + "</option>"; }).join("") + '</select><input class="input" id="vcGym" placeholder="Gym name" aria-label="Gym name"><input class="input" id="vcMap" placeholder="Google Maps link (optional)" aria-label="Map link"><input type="time" class="input" id="vcTime" aria-label="Start time (optional)"><button class="btn" id="vcAdd">Add change</button></div><div id="vcList"></div></div>' +
+      '<div class="card" style="margin-bottom:16px"><h3>Game plays by satellite</h3><div class="sub">Each satellite\'s lead sets that satellite\'s game days, start times and usual gym. Players see their own satellite\'s next game with an “I\'ll play” button. To move or call off one game, use “Change for one date” below.</div><div id="satEdit"></div>' +
+      '<div class="section-t">Change for one date</div><div class="vcadd"><input type="date" class="input" id="vcDate" aria-label="Date"><select class="input" id="vcSat" aria-label="Satellite">' + L.SATELLITES.map(function (x) { return "<option>" + x + "</option>"; }).join("") + '</select><input class="input" id="vcGym" placeholder="Gym name" aria-label="Gym name"><input class="input" id="vcMap" placeholder="Google Maps link (optional)" aria-label="Map link"><input type="time" class="input" id="vcTime" aria-label="Start time (optional)"><label class="toggle" style="white-space:nowrap"><input type="checkbox" id="vcOff"> No game</label><button class="btn" id="vcAdd">Add change</button></div><div id="vcList"></div></div>' +
       '<div class="row even"><div class="card"><h3>Google Sheet</h3><div class="sub">' + (D.sheet ? "Connected. New sign-ups and check-ins are added straight away, and the full report refreshes every night." : "Not connected yet. See the setup steps in the project README.") + "</div>" +
       '<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" id="sSheet"' + (D.sheet ? "" : " disabled") + '>Update the Sheet now</button><button class="btn" id="sCsv">Download CSV</button></div></div>' +
-      '<div class="card"><h3>Volunteers at the table</h3><div class="sub" style="margin:0">Volunteers sign in on the same page with the <b>volunteer password</b> (set as VOLUNTEER_PASSWORD in Vercel). They can only scan, find, sign up new players and see the line-up: no notes, faith steps or reports. To mark someone as a volunteer, open their record and tick Volunteer.</div></div></div><div class="row even">' +
+      '<div class="card"><h3>Volunteers at the table</h3><div class="sub" style="margin:0">Volunteers sign in on the same page with the <b>volunteer password</b> (set as VOLUNTEER_PASSWORD in Vercel). They can scan, find, sign up new players, see the line-up, and open the players assigned to them as small group lead under <b>My players</b> (and update their details, faith step, D-group and notes). They cannot see other players’ records or the reports. To mark someone as a volunteer, open their record and tick Volunteer.</div></div></div><div class="row even">' +
       '<div class="card"><h3>This phone</h3><div class="sub">Signed in as <b>' + esc(a.name) + "</b>. " + D.players.length + " players saved here for offline use" + (D.fetchedAt ? ", last updated " + new Date(D.fetchedAt).toLocaleString() : "") + ". " + outbox.length + " change(s) waiting to upload.</div>" +
       '<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" id="sSync">Sync now</button><button class="btn danger" id="sOut">Sign out</button></div></div></div>');
     paintDg(); paintSatEdit();
-    var sch = L.scheduleOf(D.settings);
-    $("#sched").innerHTML = [1, 2, 3, 4, 5, 6, 0].map(function (d) {
-      var g = sch.find(function (x) { return x.dow === d; });
-      return '<div class="schedrow"><label class="toggle"><input type="checkbox" data-dow="' + d + '"' + (g ? " checked" : "") + "> " + L.DAYS[d] + '</label><input type="time" class="input" data-time="' + d + '" value="' + esc(g ? g.time : "08:00") + '" aria-label="' + L.DAYS[d] + ' start time"></div>';
-    }).join("");
     $("#sSave").onclick = function () {
-      var schedule = $$("[data-dow]").filter(function (c) { return c.checked; }).map(function (c) { var d = +c.dataset.dow; return { dow: d, time: $('[data-time="' + d + '"]').value || "08:00" }; });
       queue({ type: "settings", data: { name: $("#sName").value.trim() || "CCF Sports Ministry", tagline: $("#sTag").value.trim(), leaders: (function () {
         var ls = $("#sLeaders").value.split("\n").map(function (s) { return s.trim(); }).filter(Boolean), me = ((auth() || {}).name || "").trim();
         if (ls.length && me && (auth() || {}).role === "leader" && !ls.some(function (n) { return n.toLowerCase() === me.toLowerCase(); })) { ls.unshift(me); $("#sLeaders").value = ls.join("\n"); A.toast("Added your name too, so you don't lock yourself out."); }
-        return ls; })(), schedule: schedule } }); A.toast("Saved");
+        return ls; })() } }); A.toast("Saved");
     };
     $("#dgAdd").onclick = function () { queue({ type: "dgroup", id: rid(), data: { name: "New D-group", leader: "", meets: "" } }); paintDg(); };
     $("#sSync").onclick = function () { sync().then(function () { A.toast(status.online ? "Up to date" : "Still offline"); }); };
@@ -870,27 +1211,37 @@
     var box = $("#satEdit"); if (!box) return;
     var sats = D.settings.satellites || {};
     box.innerHTML = L.SATELLITES.map(function (k) {
-      var v = sats[k] || {};
-      return '<div class="satrow" data-k="' + k + '"><b title="' + esc(L.satLabel(k)) + '">' + k + '</b><input class="input" data-f="gym" placeholder="Usual gym" aria-label="' + k + ' gym" value="' + esc(v.gym || "") + '"><input class="input" data-f="map" placeholder="Google Maps link" aria-label="' + k + ' map link" value="' + esc(v.map || "") + '"><input type="time" class="input" data-f="time" aria-label="' + k + ' start time" value="' + esc(v.time || "") + '"></div>';
-    }).join("") + '<div style="margin-top:8px"><button class="btn primary" id="satSave">Save gyms</button></div>';
+      var v = sats[k] || {}, sch = L.satSchedule(D.settings, k);
+      return '<div class="satblock" data-k="' + k + '"><div class="satrow"><b title="' + esc(L.satLabel(k)) + '">' + k + '</b><input class="input" data-f="gym" placeholder="Usual gym" aria-label="' + k + ' gym" value="' + esc(v.gym || "") + '"><input class="input" data-f="map" placeholder="Google Maps link" aria-label="' + k + ' map link" value="' + esc(v.map || "") + '"></div>' +
+        '<div class="sub" style="margin:4px 0 6px">Game days and start time</div><div class="satdays">' + [0, 1, 2, 3, 4, 5, 6].map(function (d) {
+          var g = sch.find(function (x) { return x.dow === d; });
+          return '<div class="daychip"><label><input type="checkbox" data-dow="' + d + '"' + (g ? " checked" : "") + "> " + L.DAYS[d].slice(0, 3) + '</label><input type="time" class="input" data-dtime="' + d + '" value="' + esc(g ? g.time : (v.time || "08:00")) + '" aria-label="' + k + " " + L.DAYS[d] + ' start time"></div>';
+        }).join("") + "</div></div>";
+    }).join("") + '<div style="margin-top:8px"><button class="btn primary" id="satSave">Save game plays</button></div>';
     $("#satSave").onclick = function () {
       var out = {};
-      $$(".satrow", box).forEach(function (row) { var o = {}; $$("[data-f]", row).forEach(function (i) { o[i.dataset.f] = i.value.trim(); }); out[row.dataset.k] = o; });
+      $$(".satblock", box).forEach(function (blk) {
+        var o = Object.assign({}, sats[blk.dataset.k] || {}); $$("[data-f]", blk).forEach(function (i) { o[i.dataset.f] = i.value.trim(); });
+        o.schedule = $$("[data-dow]", blk).filter(function (c) { return c.checked; }).map(function (c) { var d = +c.dataset.dow; return { dow: d, time: $('[data-dtime="' + d + '"]', blk).value || "08:00" }; });
+        o.time = o.schedule.length ? o.schedule[0].time : (o.time || "");
+        out[blk.dataset.k] = o;
+      });
       if (Object.keys(out).some(function (k) { return out[k].map && !/^https?:\/\//.test(out[k].map); })) return A.toast("Map links should start with https://");
-      queue({ type: "settings", data: { satellites: out } }); A.toast("Gyms saved");
+      queue({ type: "settings", data: { satellites: out } }); A.toast("Game plays saved");
     };
     var list = (D.settings.venueChanges || []).filter(function (v) { return v.date >= L.today(); }).sort(function (a, b) { return a.date.localeCompare(b.date); });
     $("#vcList").innerHTML = list.length ? '<table class="t" style="margin-top:8px"><thead><tr><th>Date</th><th>Satellite</th><th>Gym</th><th></th></tr></thead><tbody>' + list.map(function (v, i) {
-      return "<tr><td>" + esc(A.fmt(v.date)) + "</td><td>" + esc(v.satellite) + "</td><td>" + esc(v.gym || "—") + (v.time ? " · " + esc(L.fmtTime(v.time)) : "") + '</td><td><button class="btn small ghost danger" data-vcdel="' + esc(v.date + "|" + v.satellite) + '">Remove</button></td></tr>';
+      return "<tr><td>" + esc(A.fmt(v.date)) + "</td><td>" + esc(v.satellite) + "</td><td>" + (v.cancelled ? "<b>No game</b>" : esc(v.gym || "Usual gym")) + (v.time && !v.cancelled ? " · " + esc(L.fmtTime(v.time)) : "") + '</td><td><button class="btn small ghost danger" data-vcdel="' + esc(v.date + "|" + v.satellite) + '">Remove</button></td></tr>';
     }).join("") + "</tbody></table>" : '<div class="sub" style="margin:8px 0 0">No gym changes coming up.</div>';
     $("#vcAdd").onclick = function () {
       var d = $("#vcDate").value, sat = $("#vcSat").value, gym = $("#vcGym").value.trim(), map = $("#vcMap").value.trim(), tm = $("#vcTime").value;
       if (!d || d < L.today()) return A.toast("Pick a date from today on");
-      if (!gym) return A.toast("Type the gym name");
+      var off = $("#vcOff").checked;
+      if (!gym && !off && !tm) return A.toast("Type the gym or time, or tick No game");
       if (map && !/^https?:\/\//.test(map)) return A.toast("Map links should start with https://");
-      var vc = (D.settings.venueChanges || []).filter(function (v) { return !(v.date === d && v.satellite === sat); }).concat([{ date: d, satellite: sat, gym: gym, map: map, time: tm }]);
+      var vc = (D.settings.venueChanges || []).filter(function (v) { return !(v.date === d && v.satellite === sat); }).concat([{ date: d, satellite: sat, gym: off ? "" : gym, map: off ? "" : map, time: off ? "" : tm, cancelled: off }]);
       queue({ type: "settings", data: { venueChanges: vc } }); A.toast("Gym change added"); paintSatEdit();
-      $("#vcGym").value = ""; $("#vcMap").value = ""; $("#vcTime").value = "";
+      $("#vcGym").value = ""; $("#vcMap").value = ""; $("#vcTime").value = ""; $("#vcOff").checked = false;
     };
     $$("[data-vcdel]").forEach(function (b) { b.onclick = function () {
       var k = b.dataset.vcdel.split("|");
@@ -901,7 +1252,7 @@
   function paintDg() {
     var box = $("#dgEdit"); if (!box) return;
     box.innerHTML = D.dgroups.length ? D.dgroups.map(function (g) {
-      return '<div class="dg-item" data-id="' + esc(g.id) + '"><input class="input" aria-label="Group name" placeholder="Group name" value="' + esc(g.name) + '" data-f="name"><input class="input" aria-label="Leader" placeholder="Leader" value="' + esc(g.leader || "") + '" data-f="leader"><input class="input" aria-label="When and where" placeholder="When / where" value="' + esc(g.meets || "") + '" data-f="meets"><span style="display:flex;gap:4px"><button class="btn small" data-save>Save</button><button class="btn small ghost danger" data-del aria-label="Delete group">✕</button></span></div>';
+      return '<div class="dg-item" data-id="' + esc(g.id) + '"><input class="input" aria-label="Group name" placeholder="Group name" value="' + esc(g.name) + '" data-f="name"><input class="input" aria-label="D-group leader" placeholder="D-group leader" value="' + esc(g.leader || "") + '" data-f="leader"><input class="input" aria-label="When and where" placeholder="When / where" value="' + esc(g.meets || "") + '" data-f="meets"><span style="display:flex;gap:4px"><button class="btn small" data-save>Save</button><button class="btn small ghost danger" data-del aria-label="Delete group">✕</button></span></div>';
     }).join("") : '<div class="empty" style="margin-bottom:8px">No D-groups yet.</div>';
     $$(".dg-item", box).forEach(function (row) {
       var id = row.dataset.id;
@@ -919,15 +1270,13 @@
   }
   function downloadCsv() {
     var vbp = L.visitsByPlayer(D.checkins);
-    var head = ["Player code", "First name", "Last name", "Mobile", "Email", "Location", "Life stage", "Signed up as", "Church connection", "Home satellite", "Played at", "Invited by", "Wants D-group", "OK to contact", "First visit", "Last seen", "Total visits", "Attendance", "Leader", "D-group outreach", "D-group", "Faith step", "Received Christ", "Baptized", "Next step", "Notes"];
+    var head = ["Player code", "First name", "Last name", "Mobile", "Email", "Location", "Life stage", "Signed up as", "Church connection", "Home satellite", "Played at", "Invited by", "Wants D-group", "OK to contact", "First visit", "Last seen", "Total visits", "Attendance", "Small group lead (sports)", "D-group outreach", "D-group", "D-group leader", "Faith step", "Received Christ", "Baptized", "Next step", "Notes"];
     var rows = D.players.map(function (p) {
       var v = vbp.get(p.id) || [], sd = p.stageDates || {};
-      return [L.codeLabel(p), p.firstName, p.lastName, p.phone, p.email, p.location, p.lifeStage, p.volunteer ? "Volunteer" : "Attendee", p.churchStatus || "", p.satellite || "", L.playedAtText(D.checkins.filter(function (c) { return c.playerId === p.id; }), p.satellite), p.invitedBy, p.wantsConnect, p.contactOk ? "Yes" : "No", p.firstVisit, v[v.length - 1] || "", v.length, L.ATT[L.attendanceOf(v)].label, fac(p), L.outreachLabel(L.outreachOf(p)), dgName(p.dgroupId), L.stageLabel(p.stage), sd.received || "", sd.baptized || "", act(p, v), p.notes];
+      return [L.codeLabel(p), p.firstName, p.lastName, p.phone, p.email, p.location, p.lifeStage, p.volunteer ? "Volunteer" : "Attendee", p.churchStatus || "", p.satellite || "", L.playedAtText(D.checkins.filter(function (c) { return c.playerId === p.id; }), p.satellite), p.invitedBy, p.wantsConnect, p.contactOk ? "Yes" : "No", p.firstVisit, v[v.length - 1] || "", v.length, L.ATT[L.attendanceOf(v)].label, fac(p), L.outreachLabel(L.outreachOf(p)), dgName(p.dgroupId), L.dgroupLeaderOf(p, D.dgroups), L.stageLabel(p.stage), sd.received || "", sd.baptized || "", act(p, v), p.notes];
     });
     var csv = [head].concat(rows).map(function (r) { return r.map(function (x) { var s = String(x == null ? "" : x); if (/^[=+\-@]/.test(s)) s = "'" + s; return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }).join(","); }).join("\n");
-    var a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob(["﻿" + csv], { type: "text/csv" }));
-    a.download = "ccf-players-" + L.today() + ".csv"; document.body.appendChild(a); a.click(); a.remove();
+    saveFile("ccf-players-" + L.today() + ".csv", new Blob(["\ufeff" + csv], { type: "text/csv" }));
   }
 
   /* first sync when a signed-in leader opens the app */

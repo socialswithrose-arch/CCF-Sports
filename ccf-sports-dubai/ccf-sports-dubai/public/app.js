@@ -303,6 +303,13 @@
       modal('<div class="mhead"><h3>Remove from this phone?</h3></div><p>Your record stays safe. You can find it again with your player code ' + esc(L.codeLabel(p)) + '.</p><div class="mfoot"><span class="sp"></span><button class="btn" data-close>Cancel</button><button class="btn primary" id="rm-yes">Remove</button></div>', { narrow: true });
       $("#rm-yes").onclick = function () { save("ccf.player", null); save("ccf.me", null); save("ccf.pqueue", null); closeModal(); go("#/"); };
     };
+    // keep "Your game today" current while the app is open (leaders can change the line-up)
+    clearInterval(mePoll);
+    mePoll = setInterval(function () {
+      if (parseHash().path !== "/me") { clearInterval(mePoll); return; }
+      if (document.visibilityState !== "visible" || $("#modalRoot .overlay")) return;
+      refreshMe().then(function (r) { if (r && parseHash().path === "/me") paintNextGame(r.nextGame, r.tonight); });
+    }, 20000);
     flushPlayerQueue().then(refreshMe).then(function (r) {
       if (!r || parseHash().path !== "/me") return;
       $("#me-visits").textContent = r.visits.length;
@@ -313,15 +320,18 @@
     });
   };
 
+  var mePoll = null;
   /* "I'll play" card for the next game. Saying yes doesn't check you in: you still scan at the court. */
   /* "Game 1 · Team A" style text for a player's spot in today's line-up. */
   function spotHTML(spot) {
     if (!spot) return "";
-    if (spot.sitOut) return '<div class="spot"><div class="kicker2">' + L.dayName() + '\'s line-up</div><b>You\'re sitting out</b><span>Ask a leader if you want to play.</span></div>';
+    var where = (spot.satellite ? esc(spot.satellite) : "") + (spot.gym ? " · " + esc(spot.gym) : "");
+    if (spot.sitOut) return '<div class="spot"><div class="kicker2">' + L.dayName() + '\'s line-up' + (where ? " · " + where : "") + '</div><b>You\'re sitting out</b><span>Ask a leader if you want to play.</span><button class="btn small ghost" data-refresh-spot>Refresh</button></div>';
     var now = spot.game === 1;
-    return '<div class="spot' + (now ? " now" : "") + '"><div class="kicker2">Your spot in ' + L.dayName() + '\'s line-up' + (spot.satellite ? " · " + esc(spot.satellite) : "") + '</div><b>Game ' + spot.game + " · Team " + esc(spot.team) + "</b><span>" +
-      (now ? "You're in the first game. Get ready!" : "#" + spot.n + " in line. " + (spot.game === 2 ? "You're up next after Game 1." : "Games " + 1 + "–" + (spot.game - 1) + " go before you.")) +
-      '</span><button class="btn small ghost" data-refresh-spot>Refresh</button></div>';
+    return '<div class="spot' + (now ? " now" : "") + '"><div class="kicker2">Your game today' + (where ? " · " + where : "") + '</div><b>Game ' + spot.game + " · Team " + esc(spot.team) + "</b><span>" +
+      (now ? "You're in the first game. Get ready!" : "#" + spot.n + " in line. " + (spot.game === 2 ? "You're up next after Game 1." : "Games 1–" + (spot.game - 1) + " go before you.")) +
+      (spot.games ? " " + spot.games + (spot.games === 1 ? " game" : " games") + " today." : "") +
+      '</span><span style="font-size:12px">Updates by itself if a leader changes the line-up.</span><button class="btn small ghost" data-refresh-spot>Refresh</button></div>';
   }
   function paintNextGame(ng, spot) {
     var box = $("#nextGame"); if (!box) return;
@@ -336,6 +346,7 @@
     var isToday = ng.date === L.today();
     var vt = (ng.venues || [])[0], tm = (ng.venues || []).length === 1 && vt && vt.time ? vt.time : ng.time;
     var when = (isToday ? "Today" : fmt(ng.date)) + (tm ? ", " + L.fmtTime(tm) : "");
+    var mySat = ng.satellite ? '<div class="sub" style="margin:2px 0 0">Your satellite: <b>' + esc(L.satLabel(ng.satellite)) + "</b></div>" : "";
     var status = ng.checkedIn ? '<span class="pill good">' + icon(ICONS.check, 14, "currentColor", 3) + "You're checked in</span>" :
       ng.going === true ? '<span class="pill good">You said you\'ll play</span>' : ng.going === false ? '<span class="pill">You can\'t make it</span>' : "";
     var venues = (ng.venues || []).map(function (v) {
@@ -343,7 +354,7 @@
         (v.changed ? ' <span class="pill warn">Gym changed this week</span>' : "") + "</div>" + (v.map ? '<a class="btn small" href="' + esc(v.map) + '" target="_blank" rel="noopener">Directions</a>' : "") + "</div>";
     }).join("");
     if ((ng.venues || []).length > 1) venues = '<div class="sub" style="margin:8px 0 4px">Go to your satellite\'s gym:</div>' + venues;
-    box.innerHTML = '<div class="card" style="padding:14px 16px"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><div><div class="kicker2">Next game</div><div style="font-weight:700;font-size:17px">' + esc(when) + "</div></div>" +
+    box.innerHTML = '<div class="card" style="padding:14px 16px"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><div><div class="kicker2">Next game</div><div style="font-weight:700;font-size:17px">' + esc(when) + "</div>" + mySat + "</div>" +
       '<span style="margin-left:auto">' + status + "</span></div>" + venues +
       (ng.checkedIn ? "" : '<div class="grid2" style="margin-top:12px"><button class="btn ' + (ng.going === true ? "primary" : "") + '" data-rsvp="1" aria-pressed="' + (ng.going === true) + '">I\'ll play</button><button class="btn" data-rsvp="0" aria-pressed="' + (ng.going === false) + '">Can\'t make it</button></div>' +
         '<div class="sub" style="margin:8px 0 0">' + (isToday ? "At the court, scan today's check-in QR or show your code to check in." : "We'll save you a spot. You still check in at the court.") + "</div>") + "</div>";

@@ -59,11 +59,12 @@ function playerRow(p, visits, dgroups, t, rsvps, myCheckins) {
     txt(p.invitedBy), txt(p.wantsConnect), yn(p.contactOk), p.firstVisit || "", visits[visits.length - 1] || "",
     visits.length, recent, Logic.ATT[Logic.attendanceOf(visits, t)].label, yn(p.followedUp),
     Logic.outreachLabel(Logic.outreachOf(p)), p.dgOutreachDate || "", txt(g ? g.name : ""), p.dgroupDate || "",
-    txt(Logic.facilitatorOf(p, dgroups) || "Unassigned"), Logic.stageLabel(p.stage), sd.received || "", sd.baptized || "",
+    txt(Logic.facilitatorOf(p) || "Unassigned"), Logic.stageLabel(p.stage), sd.received || "", sd.baptized || "",
     Logic.nextAction(p, visits, dgroups, t, rsvps), txt(p.notes),
     p.volunteer ? "Volunteer" : txt(p.churchStatus || ""),
     txt(p.satellite || ""),
-    Logic.playedAtText(myCheckins || [], p.satellite)
+    Logic.playedAtText(myCheckins || [], p.satellite),
+    txt(p.dgroupId ? Logic.dgroupLeaderOf(p, dgroups) : "")
   ];
 }
 function checkinRow(c, p) { return [c.date, Logic.codeLabel(p || {}), txt((p ? Logic.fullName(p) : "") + (c.role === "volunteer" ? " (volunteer)" : "")), yn(c.firstTime)]; }
@@ -76,7 +77,7 @@ async function appendCheckins(items) {
 }
 async function appendPlayers(players, dgroups) {
   if (!enabled() || !players.length) return;
-  try { const t = Logic.today(); await append("'Player Report'!A1:AC", players.map((p) => playerRow(p, [], dgroups || [], t))); }
+  try { const t = Logic.today(); await append("'Player Report'!A1:AD", players.map((p) => playerRow(p, [], dgroups || [], t))); }
   catch (e) { console.error("sheet append player", e.message); }
 }
 
@@ -96,16 +97,20 @@ async function rebuild(data) {
   ((settings && settings.leaders) || []).forEach((n) => n && names.add(n));
   dgroups.forEach((g) => g.leader && names.add(g.leader));
   players.forEach((p) => { if (p.volunteer) { const n = [p.firstName, p.lastName].filter(Boolean).join(" ").trim(); if (n) names.add(n); } });
-  players.forEach((p) => { const f = Logic.facilitatorOf(p, dgroups); if (f) names.add(f); });
+  players.forEach((p) => { const f = Logic.facilitatorOf(p); if (f) names.add(f); });
   const lrows = [["Unassigned"]].concat([...names].sort((a, b) => a.localeCompare(b)).map((n) => [txt(n)]));
 
-  await clear("'Player Report'!A2:AC");
-  await append("'Player Report'!A1:AC", prows);
+  // headers for the renamed and new columns
+  await update("'Player Report'!U1", [["Small group lead (sports)"]]);
+  await update("'Player Report'!AD1", [["D-group leader"]]);
+  await update("'Check-ins'!F1:G1", [["Satellite", "Gym"]]);
+  await clear("'Player Report'!A2:AD");
+  await append("'Player Report'!A1:AD", prows);
   await clear("'Check-ins'!A2:D");
   await append("'Check-ins'!A1:D", crows);
-  await clear("'Check-ins'!F2:F");
-  const sats = checkins.slice().sort((a, b) => b.date.localeCompare(a.date)).map((c) => [txt(c.satellite || "")]);
-  if (sats.length) await update("'Check-ins'!F2:F" + (sats.length + 1), sats);
+  await clear("'Check-ins'!F2:G");
+  const sats = checkins.slice().sort((a, b) => b.date.localeCompare(a.date)).map((c) => [txt(c.satellite || ""), txt(c.venue || "")]);
+  if (sats.length) await update("'Check-ins'!F2:G" + (sats.length + 1), sats);
   await clear("Leaders!A2:A");
   await update("Leaders!A2:A" + (lrows.length + 1), lrows);
   const stamp = new Intl.DateTimeFormat("en-GB", { timeZone: Logic.TZ, day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date());

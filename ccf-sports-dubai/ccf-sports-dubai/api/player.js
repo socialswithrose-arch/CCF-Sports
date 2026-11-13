@@ -20,17 +20,20 @@ async function playerFor(body) {
   return p;
 }
 
-/* Where this player is in today's line-up (only their own spot is shared). */
-function spotFor(playerId, checkins, date) {
+/* Where this player is in today's line-up (only their own spot is shared). Uses the same order and game sizes the leaders see. */
+async function spotFor(playerId, checkins, date) {
   const day = checkins.filter((c) => c.date === date);
   const mine = day.find((c) => c.playerId === playerId);
   if (!mine) return null;
-  if (mine.sitOut) return { sitOut: true, satellite: mine.satellite || "" };
-  const tonight = day.filter((c) => (c.satellite || "") === (mine.satellite || ""));
-  const lu = Logic.lineup(tonight);
+  const settings = (await db.get("settings", "main")) || {};
+  const sat = mine.satellite || "", gym = mine.venue || (sat ? Logic.venueFor(settings, sat, date).gym : "");
+  if (mine.sitOut) return { sitOut: true, satellite: sat, gym };
+  const tonight = day.filter((c) => (c.satellite || "") === sat);
+  const players = await db.all("players");
+  const lu = Logic.lineup(tonight, players, Logic.gameConfig(settings, date, sat));
   const me = lu.find((x) => x.checkin.playerId === playerId);
   const games = lu.length ? lu[lu.length - 1].game : 0;
-  return me ? { game: me.game, team: me.team, n: me.n, games, players: lu.length, satellite: mine.satellite || "" } : null;
+  return me ? { game: me.game, team: me.team, n: me.n, games, players: lu.length, satellite: sat, gym } : null;
 }
 
 /* Record one check-in; returns { already, visitNumber }. */
@@ -38,17 +41,18 @@ async function doCheckin(p, date, satellite) {
   const id = date + "_" + p.id;
   const existing = await db.get("checkins", id);
   const visits = (await db.all("checkins")).filter((c) => c.playerId === p.id);
-  if (existing) return { already: true, visitNumber: visits.length, spot: spotFor(p.id, await db.all("checkins"), date) };
+  if (existing) return { already: true, visitNumber: visits.length, spot: await spotFor(p.id, await db.all("checkins"), date) };
   const firstTime = visits.length === 0;
   const sat = Logic.SATELLITES.includes(satellite) ? satellite : (p.satellite || "");
-  const rec = { playerId: p.id, date, ts: Date.now(), firstTime, by: "self", role: p.volunteer ? "volunteer" : "player", satellite: sat };
+  const venue = sat ? Logic.venueFor((await db.get("settings", "main")) || {}, sat, date).gym : "";
+  const rec = { playerId: p.id, date, ts: Date.now(), firstTime, by: "self", role: p.volunteer ? "volunteer" : "player", satellite: sat, venue };
   await db.put("checkins", id, rec);
   const upd = {};
   if (!p.firstVisit || p.firstVisit > date) upd.firstVisit = date;
   if (!p.satellite && sat) upd.satellite = sat;
   if (Object.keys(upd).length) await db.patch("players", p.id, upd);
   await sheets.appendCheckins([{ checkin: rec, player: p }]);
-  return { already: false, visitNumber: visits.length + 1, firstTime, spot: spotFor(p.id, await db.all("checkins"), date) };
+  return { already: false, visitNumber: visits.length + 1, firstTime, spot: await spotFor(p.id, await db.all("checkins"), date) };
 }
 
 module.exports = handler({
@@ -103,13 +107,13 @@ module.exports = handler({
     const visits = allCheckins.filter((c) => c.playerId === p.id).map((c) => c.date).sort();
     const g = p.dgroupId ? await db.get("dgroups", p.dgroupId) : null;
     const settings = (await db.get("settings", "main")) || {};
-    const next = Logic.nextGame(settings);
+    const next = Logic.nextGame(settings, Logic.today(), p.satellite || "");
     const r = next ? await db.get("rsvps", next.date + "_" + p.id) : null;
-    const sats = p.satellite ? [p.satellite] : Logic.SATELLITES;
+    const sats = p.satellite ? [p.satellite] : Logic.SATELLITES.filter((s) => next && Logic.isGameDay(settings, next.date, s));
     if (next) next.venues = sats.map((sat) => Logic.venueFor(settings, sat, next.date));
     return { player: { ...publicPlayer(p), satellite: p.satellite || "" }, visits, dgroup: g ? { name: g.name, leader: g.leader || "", meets: g.meets || "" } : null,
-      nextGame: next ? { ...next, going: r ? r.going : null, checkedIn: visits.includes(next.date) } : null,
-      tonight: visits.includes(Logic.today()) ? spotFor(p.id, allCheckins, Logic.today()) : null };
+      nextGame: next ? { ...next, satellite: p.satellite || "", going: r ? r.going : null, checkedIn: visits.includes(next.date) } : null,
+      tonight: visits.includes(Logic.today()) ? await spotFor(p.id, allCheckins, Logic.today()) : null };
   },
 
   /* "I'll play" / "Can't make it" for an upcoming game. */
