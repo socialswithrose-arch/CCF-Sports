@@ -144,7 +144,8 @@
       '<form id="lg" class="stackv" novalidate><p class="sub" style="font-size:15px;margin:0">For leaders and volunteers helping at the table. Use the password the ministry lead gave you.</p>' +
       '<div><label class="f" for="lg-name">Your name (as players know you)</label><input class="input" id="lg-name" autocomplete="name" value="' + esc(last) + '"></div>' +
       '<div><label class="f" for="lg-pw">Password</label><input class="input" id="lg-pw" type="password" autocomplete="current-password"></div>' +
-      '<div class="err" id="lg-err" role="alert"></div><button class="btn primary big" type="submit">Sign in</button></form>');
+      '<div class="err" id="lg-err" role="alert"></div><button class="btn primary big" type="submit">Sign in</button>' +
+      '<p style="text-align:center;margin:4px 0 0"><a href="#/" style="color:#03a3b4">← Back to home</a></p></form>');
     $("#lg").addEventListener("submit", function (e) {
       e.preventDefault();
       var name = $("#lg-name").value.trim(), pw = $("#lg-pw").value, err = $("#lg-err");

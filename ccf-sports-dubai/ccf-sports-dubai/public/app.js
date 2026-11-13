@@ -167,7 +167,7 @@
       '<div class="brand" style="flex:1;min-width:0">' + '<span>' + esc(opts.title || "CCF Sports Ministry") + (opts.sub ? "<small>" + esc(opts.sub) + "</small>" : "") + "</span></div>" +
       (opts.right || "") + "</div></header>";
     $("#app").innerHTML = top + '<main class="' + (opts.wide ? "" : "narrow") + '">' + body + "</main>" + (opts.after || "");
-    var b = $("[data-back]"); if (b) b.onclick = function () { if (history.length > 1) history.back(); else go(opts.backTo || "#/"); };
+    var b = $("[data-back]"); if (b) b.onclick = function () { if (opts.backTo) go(opts.backTo); else if (history.length > 1) history.back(); else go("#/"); };
   }
 
   /* ---------------- player data ---------------- */
