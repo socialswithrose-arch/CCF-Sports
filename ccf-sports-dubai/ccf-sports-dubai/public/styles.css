@@ -283,7 +283,7 @@ table.t td.num,table.t th.num{text-align:right;font-variant-numeric:tabular-nums
 .lastsat{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:13px;margin-top:6px;color:var(--text-2)}
 body.pdfmode .noprint,body.pdfmode nav.bottom,body.pdfmode nav.ltabs,body.pdfmode .pvbar{display:none!important}
 body.pdfmode main{padding-bottom:16px!important}
-body.pdfmode main{width:1100px;max-width:none!important}
+body.pdfmode main{width:1100px;max-width:none!important;margin:0!important}
 body.pdfmode .table-wrap{overflow:visible!important;max-height:none!important}
 body.pdfmode table.t{font-size:12px}
 body.pdfmode table.t th,body.pdfmode table.t td{padding:6px 5px;white-space:normal}

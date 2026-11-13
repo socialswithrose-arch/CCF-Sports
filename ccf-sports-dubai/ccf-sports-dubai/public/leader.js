@@ -72,7 +72,7 @@
       opened.forEach(function (d) { d.open = true; });
       var top = main.getBoundingClientRect().top;
       var breaks = Array.prototype.slice.call(main.children).map(function (el) { return el.getBoundingClientRect().bottom - top; });
-      var opts = { backgroundColor: LIGHT["--bg"], pixelRatio: 2, cacheBust: false };
+      var opts = { backgroundColor: LIGHT["--bg"], pixelRatio: 2, cacheBust: false, width: main.scrollWidth, height: main.scrollHeight, style: { margin: "0", transform: "none" } };
       return window.htmlToImage.toCanvas(main, opts).catch(function () { return window.htmlToImage.toCanvas(main, Object.assign({ skipFonts: true }, opts)); }).then(function (cv) { return { cv: cv, breaks: breaks, w: main.offsetWidth }; });
     }).then(function (r) {
       var PDF = window.PDFLib, ratio = r.cv.width / r.w, pageW = 595.28, pageH = 841.89, mar = 28, head = 22;
