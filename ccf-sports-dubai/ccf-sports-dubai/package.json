@@ -1,0 +1,10 @@
+{
+  "name": "ccf-sports-ministry",
+  "private": true,
+  "version": "1.0.0",
+  "description": "CCF Sports Ministry check-in app and leaders' report",
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@neondatabase/serverless": "^1.0.0"
+  }
+}
