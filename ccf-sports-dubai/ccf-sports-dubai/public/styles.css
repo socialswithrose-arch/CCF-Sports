@@ -105,6 +105,7 @@ textarea.input{min-height:80px}
 .qrcard{background:#fff;color:#111;border-radius:20px;padding:22px;display:flex;flex-direction:column;align-items:center;gap:10px;border:1px solid var(--line)}
 .qrcard .qr{width:220px;height:220px;display:grid;place-items:center}
 .qrcard .qr img,.qrcard .qr canvas{display:block;width:220px;height:220px;image-rendering:pixelated}
+.qrcard .qr.qr-sm,.qrcard .qr.qr-sm img,.qrcard .qr.qr-sm canvas{width:150px;height:150px}
 .qrcard .code{font-family:var(--display);font-weight:800;font-size:32px;letter-spacing:.08em}
 .qrcard .who{font-size:14px;color:#555}
 .tiles{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}

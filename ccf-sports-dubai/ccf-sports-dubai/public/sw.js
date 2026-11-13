@@ -1,6 +1,6 @@
 /* Offline support: keep the app's files on the phone so it opens without internet.
    API calls always go to the network; the app queues changes itself when offline. */
-const VERSION = "ccf-v7";
+const VERSION = "ccf-v8";
 const SHELL = [
   "/", "/index.html", "/styles.css", "/logic.js", "/app.js", "/leader.js", "/manifest.webmanifest",
   "/icons/icon-192.png", "/icons/icon-512.png", "/icons/apple-touch-icon.png", "/brand/logo.png", "/brand/team.jpg",
