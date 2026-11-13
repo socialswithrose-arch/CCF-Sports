@@ -293,7 +293,7 @@
       '<div class="code">' + esc(L.codeLabel(p)) + "</div>" + '<span class="pill good">' + icon(ICONS.check, 14, "currentColor", 3) + "Works without internet</span></div>" +
       (queued ? '<div class="banner warn">' + icon(ICONS.wifiOff, 20, "currentColor") + "<span>" + queued + " check-in waiting to upload. It will go through when you're online.</span></div>" : "") +
       '<div id="nextGame"></div>' +
-      '<a class="btn primary big" href="#/scan">' + icon(ICONS.scan, 22, "currentColor") + "Scan " + L.dayName() + "'s check-in QR</a>" +
+      '<a class="btn primary big" id="scanBtn" href="#/scan" style="display:none">' + icon(ICONS.scan, 22, "currentColor") + "Scan today's check-in QR</a>" +
       '<div class="tiles"><div class="tile"><div class="l">Visits</div><div class="v" id="me-visits">' + (cache.visits || []).length + '</div><div class="sub" style="margin:0" id="me-last">' + ((cache.visits || []).length ? "Last: " + fmt(cache.visits[cache.visits.length - 1]) : "Welcome!") + "</div></div>" +
       '<div class="tile"><div class="l">My D-group</div><div id="me-dg" style="font-weight:700;margin-top:4px">' + (cache.dgroup ? esc(cache.dgroup.name) : "Not yet") + '</div><div class="sub" style="margin:0" id="me-dgl">' + (cache.dgroup && cache.dgroup.leader ? "Leader: " + esc(cache.dgroup.leader) : "Ask a leader") + "</div></div></div>" +
       '<p style="text-align:center;font-size:13px;color:var(--muted)">Tip: take a screenshot of your QR as a backup.<br><button class="btn ghost small" id="me-out">Not you? Remove from this phone</button></p></div>');
@@ -325,6 +325,7 @@
   }
   function paintNextGame(ng, spot) {
     var box = $("#nextGame"); if (!box) return;
+    var sb = $("#scanBtn"); if (sb) sb.style.display = ng && ng.date === L.today() ? "" : "none";
     if (spot && ng && ng.date === L.today()) {
       box.innerHTML = spotHTML(spot);
       var rb = $("[data-refresh-spot]", box);
